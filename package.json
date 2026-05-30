@@ -7,7 +7,12 @@
   "scripts": {
     "build": "pnpm build:paywall && tsup",
     "build:paywall": "tsx src/paywall/build.ts",
-    "typecheck": "tsc --noEmit"
+    "compat:all": "pnpm compat:payment-identifier && pnpm compat:offer-receipt && pnpm compat:siwx && pnpm compat:mcp-axios",
+    "compat:mcp-axios": "tsx examples/compat/mcp-axios.ts",
+    "compat:offer-receipt": "tsx examples/compat/offer-receipt.ts",
+    "compat:payment-identifier": "tsx examples/compat/payment-identifier.ts",
+    "compat:siwx": "tsx examples/compat/siwx.ts",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.examples.json"
   },
   "dependencies": {
     "@nktkas/hyperliquid": "^0.25.9",
@@ -27,6 +32,10 @@
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@x402/axios": "^2.14.0",
+    "@x402/extensions": "^2.14.0",
+    "axios": "^1.16.0",
+    "dotenv": "^16.6.1",
     "esbuild": "^0.25.4",
     "tsup": "^8.4.0",
     "tsx": "^4.20.3",
