@@ -1,9 +1,25 @@
 {
   "name": "x402-hl",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "Standalone Hyperliquid primitives and injected-wallet paywall for x402.",
+  "license": "MIT",
+  "author": "Peezy",
+  "homepage": "https://github.com/peezy-tech/x402-hl#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/peezy-tech/x402-hl.git"
+  },
+  "bugs": {
+    "url": "https://github.com/peezy-tech/x402-hl/issues"
+  },
+  "keywords": [
+    "x402",
+    "hyperliquid",
+    "payments",
+    "paywall",
+    "http-402"
+  ],
   "scripts": {
     "build": "pnpm build:paywall && tsup",
     "build:paywall": "tsx src/paywall/build.ts",
@@ -74,7 +90,9 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "examples/compat",
+    "src/paywall/gen"
   ],
   "engines": {
     "node": ">=24"
