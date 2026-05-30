@@ -1,0 +1,5 @@
+node_modules
+dist
+src/paywall/dist
+src/paywall/gen
+.env
