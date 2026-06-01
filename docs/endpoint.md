@@ -3,8 +3,8 @@
 Use the endpoint primitives when you own an HTTP resource and want to accept
 Hyperliquid as an x402 payment method.
 
-This guide shows the Express shape used by the production sample at
-`https://hq.peezy.tech/x402`.
+This guide shows a standalone Express shape. It works in any app that can run
+upstream `@x402/*` packages and `x402-hl`.
 
 ## Install
 
@@ -121,4 +121,3 @@ console.log(response.status, response.headers.get("PAYMENT-RESPONSE"));
 
 The payer account must hold enough Hyperliquid testnet spot USDC for the
 configured amount.
-

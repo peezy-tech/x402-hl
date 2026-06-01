@@ -3,8 +3,8 @@
 Use the facilitator primitive when you operate an x402 facilitator that should
 verify and settle Hyperliquid payments.
 
-`x402-hl` registers Hyperliquid support with upstream `@x402/core` instead of
-requiring a forked x402 package.
+`x402-hl` registers Hyperliquid support with upstream `@x402/core`; it does
+not require a forked x402 package or a monorepo checkout.
 
 ## Install
 
@@ -92,5 +92,5 @@ export const facilitatorClient: FacilitatorClient = {
 };
 ```
 
-The production sample in `x402-demo/src/facilitator.ts` uses this pattern.
-
+This adapter can live inside the same app as your protected resource, or behind
+your own facilitator HTTP service.

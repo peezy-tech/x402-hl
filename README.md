@@ -10,7 +10,7 @@ without carrying a fork of the upstream x402 repository.
 - `x402-hl`: constants, types, signer helpers, utilities, and exact scheme aliases.
 - `x402-hl/exact/client`: `ExactHyperliquidScheme` for browser or server clients.
 - `x402-hl/exact/server`: `ExactHyperliquidScheme` for resource servers.
-- `x402-hl/exact/facilitator`: `ExactHyperliquidScheme` for local facilitators.
+- `x402-hl/exact/facilitator`: `ExactHyperliquidScheme` for facilitators.
 - `x402-hl/paywall`: `hyperliquidPaywall`, compatible with `@x402/paywall`.
 
 ## Environment
@@ -65,8 +65,8 @@ The payer account must already hold enough Hyperliquid testnet spot USDC.
 
 ## Guides
 
-- [Production sample](./docs/production-sample.md): the live `x402-demo`
-  deployment and what it proves.
+- [Production sample](./docs/production-sample.md): a deployed reference shape
+  for an app that accepts Hyperliquid x402 payments.
 - [Facilitator integration](./docs/facilitator.md): register Hyperliquid
   verification and settlement with upstream `@x402/core`.
 - [Accept Hyperliquid payments](./docs/endpoint.md): configure an x402 endpoint
