@@ -2,9 +2,8 @@
 
 Standalone Hyperliquid primitives for x402.
 
-This package factors the local Peezy fork implementation into a separate nested
-repository that depends on upstream x402 packages instead of importing from
-`../fork`.
+This package provides the supported Hyperliquid integration path for x402
+without carrying a fork of the upstream x402 repository.
 
 ## Exports
 
