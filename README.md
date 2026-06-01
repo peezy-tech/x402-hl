@@ -63,6 +63,15 @@ pnpm compat:all
 `HYPERLIQUID_MCP_PAYER_PRIVATE_KEY` or `HYPERLIQUID_PAYER_PRIVATE_KEY` is set.
 The payer account must already hold enough Hyperliquid testnet spot USDC.
 
+## Guides
+
+- [Production sample](./docs/production-sample.md): the live `x402-demo`
+  deployment and what it proves.
+- [Facilitator integration](./docs/facilitator.md): register Hyperliquid
+  verification and settlement with upstream `@x402/core`.
+- [Accept Hyperliquid payments](./docs/endpoint.md): configure an x402 endpoint
+  that accepts `hyperliquid:testnet`.
+
 ## Build
 
 ```sh
