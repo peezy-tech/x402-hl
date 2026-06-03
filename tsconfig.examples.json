@@ -2,7 +2,14 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": true,
-    "rootDir": "."
+    "rootDir": ".",
+    "paths": {
+      "x402-hl": ["./src/index.ts"],
+      "x402-hl/exact/client": ["./src/exact/client/index.ts"],
+      "x402-hl/exact/server": ["./src/exact/server/index.ts"],
+      "x402-hl/exact/facilitator": ["./src/exact/facilitator/index.ts"],
+      "x402-hl/paywall": ["./src/paywall/index.ts"]
+    }
   },
   "include": ["examples/**/*.ts"]
 }

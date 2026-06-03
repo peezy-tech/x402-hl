@@ -63,6 +63,10 @@ pnpm compat:all
 `HYPERLIQUID_MCP_PAYER_PRIVATE_KEY` or `HYPERLIQUID_PAYER_PRIVATE_KEY` is set.
 The payer account must already hold enough Hyperliquid testnet spot USDC.
 
+The repository also includes a standalone Express app at
+[`examples/express`](./examples/express). It is intended for GitHub readers and
+is not included in the npm package.
+
 ## Guides
 
 - [Production sample](./docs/production-sample.md): a deployed reference shape

@@ -1,6 +1,6 @@
 {
   "name": "x402-hl",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Standalone Hyperliquid primitives and injected-wallet paywall for x402.",
   "license": "MIT",
@@ -28,6 +28,7 @@
     "compat:offer-receipt": "tsx examples/compat/offer-receipt.ts",
     "compat:payment-identifier": "tsx examples/compat/payment-identifier.ts",
     "compat:siwx": "tsx examples/compat/siwx.ts",
+    "example:express:typecheck": "tsc -p examples/express/tsconfig.json",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.examples.json"
   },
   "dependencies": {
@@ -45,13 +46,17 @@
   },
   "devDependencies": {
     "@craftamap/esbuild-plugin-html": "^0.9.0",
+    "@types/express": "^5.0.3",
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@x402/axios": "^2.14.0",
+    "@x402/express": "^2.14.0",
     "@x402/extensions": "^2.14.0",
+    "@x402/fetch": "^2.14.0",
     "axios": "^1.16.0",
     "dotenv": "^16.6.1",
+    "express": "^4.21.2",
     "esbuild": "^0.25.4",
     "tsup": "^8.4.0",
     "tsx": "^4.20.3",
@@ -91,8 +96,6 @@
   },
   "files": [
     "dist",
-    "docs",
-    "examples/compat",
     "src/paywall/gen"
   ],
   "engines": {
