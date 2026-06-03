@@ -1,3 +1,8 @@
+---
+title: Production Sample
+description: Deploy a small x402 app that accepts Hyperliquid payments with x402-hl.
+---
+
 # Production Sample
 
 A production sample for this stack is any deployed app that accepts
@@ -59,8 +64,8 @@ HYPERLIQUID_PRICE_USD=0.000001
 PUBLIC_BASE_URL=https://example.com
 ```
 
-Then combine the [facilitator guide](./facilitator.md) with the
-[endpoint guide](./endpoint.md).
+Then combine the [facilitator guide](./facilitator) with the
+[endpoint guide](./endpoint).
 
 ## Validate A Sample
 

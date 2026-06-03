@@ -5,6 +5,8 @@ Standalone Hyperliquid primitives for x402.
 This package provides the supported Hyperliquid integration path for x402
 without carrying a fork of the upstream x402 repository.
 
+Docs: <https://peezy.tech/x402-hl/>
+
 ## Exports
 
 - `x402-hl`: constants, types, signer helpers, utilities, and exact scheme aliases.
@@ -69,11 +71,11 @@ is not included in the npm package.
 
 ## Guides
 
-- [Production sample](./docs/production-sample.md): a deployed reference shape
+- [Production sample](./docs/pages/production-sample.md): a deployed reference shape
   for an app that accepts Hyperliquid x402 payments.
-- [Facilitator integration](./docs/facilitator.md): register Hyperliquid
+- [Facilitator integration](./docs/pages/facilitator.md): register Hyperliquid
   verification and settlement with upstream `@x402/core`.
-- [Accept Hyperliquid payments](./docs/endpoint.md): configure an x402 endpoint
+- [Accept Hyperliquid payments](./docs/pages/endpoint.md): configure an x402 endpoint
   that accepts `hyperliquid:testnet`.
 
 ## Build

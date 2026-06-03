@@ -1,3 +1,8 @@
+---
+title: Accept Hyperliquid Payments
+description: Configure an x402 endpoint that accepts Hyperliquid as a payment method.
+---
+
 # Accept Hyperliquid Payments On An x402 Endpoint
 
 Use the endpoint primitives when you own an HTTP resource and want to accept

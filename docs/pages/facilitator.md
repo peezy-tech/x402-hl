@@ -1,3 +1,8 @@
+---
+title: Facilitator Integration
+description: Add Hyperliquid verification and settlement to an x402 facilitator.
+---
+
 # Facilitator Integration
 
 Use the facilitator primitive when you operate an x402 facilitator that should
