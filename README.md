@@ -49,6 +49,10 @@ the split-network SIWX header. The upstream `wrapFetchWithSIWx` helper currently
 does not auto-retry this shape because it matches SIWX supported chains against
 the payment network.
 
+`x402-hl` currently ships TypeScript and JavaScript runtime support only. Other
+x402 SDKs should document Hyperliquid as unsupported unless they add equivalent
+Hyperliquid exact-scheme primitives.
+
 ## Examples
 
 The compatibility examples are runnable package-level probes:
@@ -85,3 +89,6 @@ pnpm install
 pnpm build
 pnpm typecheck
 ```
+
+Maintainers should use the repository `RELEASE_CHECKLIST.md` before publishing
+a new package version.
