@@ -1,45 +1,61 @@
 ---
 title: Production Sample
-description: Deploy a small x402 app that accepts Hyperliquid payments with x402-hl.
+description: Inspect the live Venice gateway that uses published x402-hl with Hyperliquid x402 payments.
 ---
 
 # Production Sample
 
-A production sample for this stack is any deployed app that accepts
-Hyperliquid x402 payments using upstream `@x402/*` packages plus `x402-hl`.
+The current production-style sample is a temporary public Venice API gateway:
 
-One reference deployment is currently live at:
+- App: `https://venice.peezy.tech/`
+- API config: `https://venice.peezy.tech/api`
+- Models: `https://venice.peezy.tech/api/v1/models`
+- Top-up paywall: `https://venice.peezy.tech/api/x402/top-up/pay/5.00`
+- Payment method: `exact` on `hyperliquid:mainnet`
+- Package: published `x402-hl@0.1.2`
 
-- App route: `https://hq.peezy.tech/x402`
-- Protected endpoint: `https://hq.peezy.tech/x402/api/paid`
-- Payment method: `exact` on `hyperliquid:testnet`
-- Browser flow: injected EVM wallet signs a Hyperliquid `sendAsset` action
-- Server stack: upstream `@x402/core`, `@x402/express`, `@x402/paywall`, and
-  published `x402-hl`
-
-A sample app should keep private keys out of git. Browser payments are signed
-by the user's injected wallet. Optional server-side payer flows should be
-enabled only when `HYPERLIQUID_PAYER_PRIVATE_KEY` is present in the runtime
-environment.
+This deployment is a real-world example of the Hyperliquid integration rather
+than a permanent hosted product. It accepts mainnet Hyperliquid USDC top-ups,
+tracks a prepaid gateway balance, and forwards authenticated chat requests to
+Venice.
 
 ## What It Proves
 
-The sample proves that an x402 resource server can advertise a Hyperliquid
-payment requirement, render a browser paywall for wallet users, verify the
-payment payload, submit the signed transfer to Hyperliquid, and return the
-settled protected response.
+The sample proves that an x402 resource server can:
 
-Use the pattern as a reference for:
+- advertise a Hyperliquid payment requirement;
+- render an injected-wallet browser paywall;
+- have the user's wallet sign a Hyperliquid `sendAsset` action;
+- verify and settle the signed payment with an in-process facilitator;
+- credit an application ledger from explicit USD top-up metadata;
+- serve paid API requests without storing payer private keys on the server.
 
-- wiring `x402-hl` into an Express resource server;
-- using an in-process facilitator for Hyperliquid settlement;
-- adding the `x402-hl/paywall` browser-wallet handler to upstream
-  `@x402/paywall`;
-- keeping recipient and optional payer credentials in environment variables.
+The gateway uses upstream `@x402/core`, `@x402/express`, `@x402/paywall`, and
+published `x402-hl`. Browser users sign payments with their injected wallet.
+The remote host only needs the public Hyperliquid receiver address and the
+ordinary application secrets needed to operate the gateway.
+
+## Production Shape
+
+The Venice gateway has a few pieces that most production samples eventually
+need:
+
+- a public base URL and stable x402 resource URLs;
+- a Hyperliquid receiver address configured outside git;
+- an in-process facilitator registered for `hyperliquid:mainnet`;
+- the `x402-hl/paywall` handler registered with upstream `@x402/paywall`;
+- a small ledger that credits allowed top-up amounts and charges usage;
+- spend caps and model allowlists to limit blast radius;
+- operational balance checks for both the application ledger and the
+  Hyperliquid receiver.
+
+The live sample intentionally keeps validation payer keys off the VPS. Funded
+validation can run from an operator machine, but the public service does not
+need a server-side payer key for browser-wallet top-ups.
 
 ## Minimal Project Shape
 
-A standalone sample can be as small as:
+A smaller app can start with:
 
 ```txt
 my-x402-hl-app/
@@ -59,17 +75,23 @@ pnpm add -D typescript tsx @types/express @types/node
 Configure runtime values outside git:
 
 ```sh
+HYPERLIQUID_NETWORK=hyperliquid:testnet
 HYPERLIQUID_PAY_TO_ADDRESS=0x...
 HYPERLIQUID_PRICE_USD=0.000001
 PUBLIC_BASE_URL=https://example.com
 ```
+
+Use `hyperliquid:testnet` while building your first sample. Switch to
+`hyperliquid:mainnet` only after you have controlled receiver credentials,
+funded-wallet validation, and an explicit operating plan for balances and
+spend limits.
 
 Then combine the [facilitator guide](./facilitator) with the
 [endpoint guide](./endpoint).
 
 ## Validate A Sample
 
-From your sample app:
+Before using funded wallets:
 
 ```sh
 pnpm typecheck
@@ -80,7 +102,10 @@ Recommended smoke checks:
 - the public page returns `200`;
 - the protected endpoint returns `402` without payment;
 - the HTML paywall contains the Hyperliquid injected-wallet UI;
-- the payment requirement advertises `hyperliquid:testnet`.
+- the payment requirement advertises the intended Hyperliquid network;
+- the requirement amount, token, and any application USD metadata agree;
+- the server credits application balances from USD metadata, not raw token base
+  units.
 
 For a funded server-side payment test:
 
@@ -89,5 +114,5 @@ HYPERLIQUID_PAYER_PRIVATE_KEY=0x... pnpm pay
 ```
 
 For the preferred browser-wallet validation, open your deployed route, select
-the wallet paywall, connect an injected wallet with Hyperliquid testnet spot
-USDC, and sign the transfer.
+the wallet paywall, connect an injected wallet with Hyperliquid spot USDC on
+the configured network, and sign the transfer.
