@@ -175,7 +175,16 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
         ? await this.findMatchingTransaction(infoClient, payer, exactPayload, requirements)
         : undefined;
 
-      const txHash = matchedHash ?? exchangeTxHash;
+      if (matchedHash && /^0x[0-9a-fA-F]{64}$/.test(matchedHash)) {
+        return {
+          success: true,
+          transaction: matchedHash,
+          network: requirements.network,
+          payer,
+        };
+      }
+
+      const txHash = exchangeTxHash;
 
       if (!txHash || !/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
         return {
@@ -307,6 +316,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
             amount,
             requirements,
             decimals,
+            nonce: this.paymentNonce(payload),
           }),
         );
         if (match) return match.hash;
@@ -362,12 +372,23 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
       amount: string;
       requirements: PaymentRequirements;
       decimals?: number;
+      nonce?: number;
     },
   ): boolean {
-    const delta = update.delta;
-    if (delta.type !== "spotTransfer") return false;
+    const delta = update.delta as {
+      type?: string;
+      user?: string;
+      destination?: string;
+      token?: string;
+      amount?: string;
+      nonce?: number;
+    };
+    if (delta.type !== "spotTransfer" && delta.type !== "send") return false;
+    if (!delta.user || !delta.destination || !delta.token || !delta.amount) return false;
     if (delta.user.toLowerCase() !== expected.payer.toLowerCase()) return false;
     if (delta.destination.toLowerCase() !== expected.destination.toLowerCase()) return false;
+    if (expected.nonce != null && typeof delta.nonce === "number" && delta.nonce !== expected.nonce)
+      return false;
     if (!this.ledgerTokenMatches(delta.token, expected.token, expected.requirements.asset))
       return false;
     return this.decimalAmountsEqual(delta.amount, expected.amount, expected.decimals);
@@ -468,5 +489,12 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     if (action.type === "spotSend") return true;
     if (action.type !== "sendAsset") return false;
     return action.sourceDex === "spot" && action.destinationDex === "spot";
+  }
+
+  private paymentNonce(payload: ExactHyperliquidPayload): number | undefined {
+    const action = payload.action as Record<string, unknown>;
+    if (typeof action.nonce === "number") return action.nonce;
+    if (typeof action.time === "number") return action.time;
+    return payload.nonce;
   }
 }

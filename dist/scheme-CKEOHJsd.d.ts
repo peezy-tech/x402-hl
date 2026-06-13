@@ -31,6 +31,7 @@ declare class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     private decimalToAtomic;
     private validateTtl;
     private validateActionShape;
+    private paymentNonce;
 }
 
 export { ExactHyperliquidScheme as E };
