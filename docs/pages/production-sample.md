@@ -7,10 +7,10 @@ description: Inspect the live Venice gateway that uses published x402-hl with Hy
 
 The current production-style sample is a temporary public Venice API gateway:
 
-- App: `https://venice.peezy.tech/`
-- API config: `https://venice.peezy.tech/api`
-- Models: `https://venice.peezy.tech/api/v1/models`
-- Top-up paywall: `https://venice.peezy.tech/api/x402/top-up/pay/5.00`
+- App: `https://ai.peezy.tech/`
+- API config: `https://ai.peezy.tech/api`
+- Models: `https://ai.peezy.tech/api/v1/models`
+- Top-up paywall: `https://ai.peezy.tech/api/x402/top-up/pay/5.00`
 - Payment method: `exact` on `hyperliquid:mainnet`
 - Package: published `x402-hl@0.1.2`
 
