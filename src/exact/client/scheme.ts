@@ -1,5 +1,5 @@
 import { PaymentPayload, PaymentRequirements, SchemeNetworkClient } from "@x402/core/types";
-import { parser, SpotSendRequest, SpotSendTypes } from "@nktkas/hyperliquid/api/exchange";
+import { parser, SendAssetRequest, SendAssetTypes } from "@nktkas/hyperliquid/api/exchange";
 import { signUserSignedAction } from "@nktkas/hyperliquid/signing";
 import { toHex } from "viem";
 import { arbitrum } from "viem/chains";
@@ -23,15 +23,18 @@ export class ExactHyperliquidScheme implements SchemeNetworkClient {
     const decimals = await this.resolveDecimals(paymentRequirements);
     const nonce = Date.now();
 
-    const request = parser(SpotSendRequest)({
+    const request = parser(SendAssetRequest)({
       action: {
-        type: "spotSend",
+        type: "sendAsset",
         signatureChainId: toHex(arbitrum.id),
         hyperliquidChain: getHyperliquidChainName(paymentRequirements.network),
         destination: paymentRequirements.payTo,
+        sourceDex: "spot",
+        destinationDex: "spot",
         token: await this.resolveTokenString(paymentRequirements),
         amount: this.formatDecimalAmount(paymentRequirements.amount, decimals),
-        time: nonce,
+        fromSubAccount: "",
+        nonce,
       },
       nonce,
       signature: {
@@ -44,7 +47,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkClient {
     const signature = await signUserSignedAction({
       wallet: this.signer as Parameters<typeof signUserSignedAction>[0]["wallet"],
       action: request.action,
-      types: SpotSendTypes,
+      types: SendAssetTypes,
     });
 
     const payload: ExactHyperliquidPayload = {

@@ -40,8 +40,9 @@ const supported = await facilitator.getSupported();
 
 ## Settlement Behavior
 
-For `exact` Hyperliquid payments, the client signs a Hyperliquid `spotSend`
-action. The facilitator:
+For `exact` Hyperliquid payments, the client signs a Hyperliquid `sendAsset`
+action from the payer's spot DEX balance to the recipient's spot DEX balance.
+The facilitator:
 
 - validates x402 version, scheme, network, recipient, asset, amount, and TTL;
 - submits the signed action to the Hyperliquid exchange endpoint;

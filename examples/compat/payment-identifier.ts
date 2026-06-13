@@ -90,20 +90,26 @@ const exactPayload = paymentPayload.payload as {
   action?: {
     type?: string;
     destination?: string;
+    sourceDex?: string;
+    destinationDex?: string;
     token?: string;
     amount?: string;
     hyperliquidChain?: string;
+    nonce?: number;
   };
   signature?: unknown;
   nonce?: unknown;
   user?: string;
 };
 
-assert(exactPayload.action?.type === "spotSend", "exact Hyperliquid payload is not a spotSend action");
-assert(exactPayload.action.destination === PAY_TO, "spotSend destination did not match payTo");
-assert(exactPayload.action.token?.startsWith("USDC:"), "spotSend token should be Hyperliquid USDC");
-assert(exactPayload.action.amount === "0.01", "spotSend amount should be decimal USDC");
-assert(exactPayload.action.hyperliquidChain === "Testnet", "spotSend should target Hyperliquid testnet");
+assert(exactPayload.action?.type === "sendAsset", "exact Hyperliquid payload is not a sendAsset action");
+assert(exactPayload.action.destination === PAY_TO, "sendAsset destination did not match payTo");
+assert(exactPayload.action.sourceDex === "spot", "sendAsset sourceDex should be spot");
+assert(exactPayload.action.destinationDex === "spot", "sendAsset destinationDex should be spot");
+assert(exactPayload.action.token?.startsWith("USDC:"), "sendAsset token should be Hyperliquid USDC");
+assert(exactPayload.action.amount === "0.01", "sendAsset amount should be decimal USDC");
+assert(exactPayload.action.hyperliquidChain === "Testnet", "sendAsset should target Hyperliquid testnet");
+assert(exactPayload.action.nonce === exactPayload.nonce, "sendAsset action nonce did not match payload nonce");
 assert(typeof exactPayload.signature === "object", "exact Hyperliquid payload did not include a signature");
 assert(typeof exactPayload.nonce === "number", "exact Hyperliquid payload did not include a nonce");
 assert(exactPayload.user?.toLowerCase() === signer.address.toLowerCase(), "payload user did not match signer");

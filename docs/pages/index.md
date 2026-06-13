@@ -10,7 +10,7 @@ fork of upstream x402.
 
 It includes:
 
-- exact client support for signing Hyperliquid `spotSend` payments;
+- exact client support for signing Hyperliquid `sendAsset` payments;
 - exact resource-server support for advertising Hyperliquid payment
   requirements;
 - exact facilitator support for verifying and settling signed Hyperliquid

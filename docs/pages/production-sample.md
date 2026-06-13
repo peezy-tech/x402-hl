@@ -13,7 +13,7 @@ One reference deployment is currently live at:
 - App route: `https://hq.peezy.tech/x402`
 - Protected endpoint: `https://hq.peezy.tech/x402/api/paid`
 - Payment method: `exact` on `hyperliquid:testnet`
-- Browser flow: injected EVM wallet signs a Hyperliquid `spotSend` action
+- Browser flow: injected EVM wallet signs a Hyperliquid `sendAsset` action
 - Server stack: upstream `@x402/core`, `@x402/express`, `@x402/paywall`, and
   published `x402-hl`
 

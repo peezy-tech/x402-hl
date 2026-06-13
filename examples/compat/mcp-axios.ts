@@ -155,9 +155,16 @@ function assertHyperliquidPayment(payment: PaymentPayload | undefined): asserts 
     throw new Error(`Expected ${HYPERLIQUID_TESTNET}, got ${payment.accepted.network}`);
   }
 
-  const payload = payment.payload as { action?: { type?: string; destination?: string }; user?: string };
+  const payload = payment.payload as {
+    action?: { type?: string; destination?: string; sourceDex?: string; destinationDex?: string };
+    user?: string;
+  };
   if (payload.user !== MOCK_PAYER) throw new Error(`Expected payer ${MOCK_PAYER}, got ${payload.user}`);
-  if (payload.action?.type !== "spotSend") throw new Error(`Expected Hyperliquid spotSend action, got ${payload.action?.type}`);
+  if (payload.action?.type !== "sendAsset") throw new Error(`Expected Hyperliquid sendAsset action, got ${payload.action?.type}`);
+  if (payload.action.sourceDex !== "spot") throw new Error(`Expected sourceDex spot, got ${payload.action.sourceDex}`);
+  if (payload.action.destinationDex !== "spot") {
+    throw new Error(`Expected destinationDex spot, got ${payload.action.destinationDex}`);
+  }
   if (payload.action.destination?.toLowerCase() !== MOCK_PAY_TO.toLowerCase()) {
     throw new Error(`Expected destination ${MOCK_PAY_TO}, got ${payload.action.destination}`);
   }

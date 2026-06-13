@@ -25,10 +25,7 @@ const MATCH_RETRY_DELAY_MS = 500;
 
 type HyperliquidExchangeResponse = {
   status: string;
-  response?: {
-    txHash?: string;
-    type?: string;
-  };
+  response?: string | Record<string, unknown>;
   hash?: string;
 };
 
@@ -79,6 +76,10 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
       return { isValid: false, invalidReason: "invalid_exact_hl_payload" };
     }
 
+    if (!this.validateActionShape(action)) {
+      return { isValid: false, invalidReason: "invalid_exact_hl_payload" };
+    }
+
     const destination = action.destination as string | undefined;
     const token = action.token as string | undefined;
     const amount = action.amount as string | undefined;
@@ -100,7 +101,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
       return { isValid: false, invalidReason: "invalid_exact_hl_payload_amount_mismatch" };
     }
 
-    const actionTime = action.time as number | undefined;
+    const actionTime = typeof action.time === "number" ? action.time : action.nonce;
     if (!this.validateTtl(actionTime, requirements.maxTimeoutSeconds)) {
       return { isValid: false, invalidReason: "payment_expired" };
     }
@@ -168,7 +169,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
 
     try {
       const exchangeResponse = await this.submitToExchange(endpoint, exactPayload);
-      const exchangeTxHash = exchangeResponse?.response?.txHash ?? exchangeResponse?.hash;
+      const exchangeTxHash = this.exchangeTxHash(exchangeResponse);
 
       const matchedHash = payer
         ? await this.findMatchingTransaction(infoClient, payer, exactPayload, requirements)
@@ -228,10 +229,41 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
         nonce: payload.nonce,
       }),
     });
-    if (!response.ok) throw new Error("hyperliquid_exchange_failed");
-    const body = (await response.json()) as HyperliquidExchangeResponse;
-    if (body?.status !== "ok") throw new Error("hyperliquid_exchange_failed");
+    const responseText = await response.text();
+    const body = this.parseExchangeResponse(responseText);
+    if (!response.ok) {
+      throw new Error(
+        `hyperliquid_exchange_failed status=${response.status} body=${this.exchangeErrorBody(body)}`,
+      );
+    }
+    if (body?.status !== "ok") {
+      throw new Error(`hyperliquid_exchange_failed body=${this.exchangeErrorBody(body)}`);
+    }
     return body;
+  }
+
+  private parseExchangeResponse(responseText: string): HyperliquidExchangeResponse {
+    try {
+      return JSON.parse(responseText) as HyperliquidExchangeResponse;
+    } catch {
+      return { status: "err", response: responseText };
+    }
+  }
+
+  private exchangeErrorBody(body: unknown): string {
+    try {
+      return JSON.stringify(body).slice(0, 500);
+    } catch {
+      return String(body).slice(0, 500);
+    }
+  }
+
+  private exchangeTxHash(response: HyperliquidExchangeResponse): string | undefined {
+    if (response.hash) return response.hash;
+    const nested = response.response;
+    if (!nested || typeof nested !== "object") return undefined;
+    const txHash = nested.txHash;
+    return typeof txHash === "string" ? txHash : undefined;
   }
 
   private async confirmTransaction(client: InfoClient, hash: string): Promise<boolean> {
@@ -430,5 +462,11 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
   private validateTtl(actionTime: unknown, maxTimeoutSeconds: number): boolean {
     if (typeof actionTime !== "number") return false;
     return Date.now() <= actionTime + maxTimeoutSeconds * 1000;
+  }
+
+  private validateActionShape(action: Record<string, unknown>): boolean {
+    if (action.type === "spotSend") return true;
+    if (action.type !== "sendAsset") return false;
+    return action.sourceDex === "spot" && action.destinationDex === "spot";
   }
 }

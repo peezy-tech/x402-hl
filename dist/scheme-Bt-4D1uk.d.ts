@@ -11,6 +11,9 @@ declare class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     settle(payload: PaymentPayload, requirements: PaymentRequirements): Promise<SettleResponse>;
     private settleVerified;
     private submitToExchange;
+    private parseExchangeResponse;
+    private exchangeErrorBody;
+    private exchangeTxHash;
     private confirmTransaction;
     private findMatchingTransaction;
     private settlementKey;
@@ -27,6 +30,7 @@ declare class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     private validateAmount;
     private decimalToAtomic;
     private validateTtl;
+    private validateActionShape;
 }
 
 export { ExactHyperliquidScheme as E };
