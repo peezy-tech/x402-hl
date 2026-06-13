@@ -17,12 +17,12 @@ var HyperliquidNetworkToChainName = {
 var HyperliquidNetworkConfigs = {
   [HYPERLIQUID_TESTNET]: {
     token: "USDC:0xeb62eee3685fc4c43992febcd9e75443",
-    decimals: 6,
+    decimals: 8,
     signatureChainId: toHex(arbitrum.id)
   },
   [HYPERLIQUID_MAINNET]: {
-    token: "USDC:0xeb62eee3685fc4c43992febcd9e75443",
-    decimals: 6,
+    token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+    decimals: 8,
     signatureChainId: toHex(arbitrum.id)
   }
 };
