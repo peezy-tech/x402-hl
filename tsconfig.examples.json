@@ -8,6 +8,9 @@
       "x402-hl/exact/client": ["./src/exact/client/index.ts"],
       "x402-hl/exact/server": ["./src/exact/server/index.ts"],
       "x402-hl/exact/facilitator": ["./src/exact/facilitator/index.ts"],
+      "x402-hl/intents": ["./src/intents/index.ts"],
+      "x402-hl/intents/client": ["./src/intents/client/index.ts"],
+      "x402-hl/intents/server": ["./src/intents/server/index.ts"],
       "x402-hl/paywall": ["./src/paywall/index.ts"]
     }
   },

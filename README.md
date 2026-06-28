@@ -13,6 +13,11 @@ Docs: <https://peezy.tech/x402-hl/>
 - `x402-hl/exact/client`: `ExactHyperliquidScheme` for browser or server clients.
 - `x402-hl/exact/server`: `ExactHyperliquidScheme` for resource servers.
 - `x402-hl/exact/facilitator`: `ExactHyperliquidScheme` for facilitators.
+- `x402-hl/intents`: execution-intent schemas, hashing, and EIP-712 helpers.
+- `x402-hl/intents/client`: a client extension for signing declared execution
+  intents alongside an x402 payment.
+- `x402-hl/intents/server`: quote, route, verification, execution, and status
+  helpers for TypeScript gateways.
 - `x402-hl/paywall`: `hyperliquidPaywall`, compatible with `@x402/paywall`.
 
 ## Environment
@@ -61,6 +66,7 @@ The compatibility examples are runnable package-level probes:
 pnpm compat:payment-identifier
 pnpm compat:offer-receipt
 pnpm compat:siwx
+pnpm compat:intents
 pnpm compat:mcp-axios
 pnpm compat:all
 ```
@@ -81,6 +87,8 @@ is not included in the npm package.
   verification and settlement with upstream `@x402/core`.
 - [Accept Hyperliquid payments](./docs/pages/endpoint.md): configure an x402 endpoint
   that accepts `hyperliquid:testnet`.
+- [Execution intents](./docs/pages/intents.md): bind a settled Hyperliquid x402
+  payment to a signed HyperEVM execution intent.
 
 ## Build
 

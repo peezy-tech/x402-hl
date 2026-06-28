@@ -41,6 +41,11 @@ pnpm add @x402/fetch viem
 - `x402-hl/exact/client`: `ExactHyperliquidScheme` for clients.
 - `x402-hl/exact/server`: `ExactHyperliquidScheme` for resource servers.
 - `x402-hl/exact/facilitator`: `ExactHyperliquidScheme` for facilitators.
+- `x402-hl/intents`: execution-intent schemas, hashing, and EIP-712 helpers.
+- `x402-hl/intents/client`: a client extension for signing declared execution
+  intents alongside an x402 payment.
+- `x402-hl/intents/server`: quote, route, verification, execution, and status
+  helpers for TypeScript gateways.
 - `x402-hl/paywall`: `hyperliquidPaywall` for upstream `@x402/paywall`.
 
 ## Start Here
@@ -49,5 +54,6 @@ pnpm add @x402/fetch viem
   settlement to an x402 facilitator.
 - [Accept Hyperliquid payments](./endpoint): configure an HTTP endpoint that
   accepts `hyperliquid:testnet`.
+- [Execution intents](./intents): bind HyperCore payment to HyperEVM execution.
 - [Production sample](./production-sample): deploy a small app that proves the
   full stack.

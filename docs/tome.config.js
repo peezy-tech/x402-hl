@@ -14,6 +14,7 @@ export default {
       pages: [
         "facilitator",
         "endpoint",
+        "intents",
         "production-sample",
       ],
     },

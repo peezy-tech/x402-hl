@@ -23,7 +23,8 @@
   "scripts": {
     "build": "pnpm build:paywall && tsup",
     "build:paywall": "tsx src/paywall/build.ts",
-    "compat:all": "pnpm compat:payment-identifier && pnpm compat:offer-receipt && pnpm compat:siwx && pnpm compat:mcp-axios",
+    "compat:all": "pnpm compat:payment-identifier && pnpm compat:offer-receipt && pnpm compat:siwx && pnpm compat:intents && pnpm compat:mcp-axios",
+    "compat:intents": "tsx examples/compat/intents.ts",
     "compat:mcp-axios": "tsx examples/compat/mcp-axios.ts",
     "compat:offer-receipt": "tsx examples/compat/offer-receipt.ts",
     "compat:payment-identifier": "tsx examples/compat/payment-identifier.ts",
@@ -88,6 +89,24 @@
       "import": {
         "types": "./dist/exact/facilitator/index.d.ts",
         "default": "./dist/exact/facilitator/index.js"
+      }
+    },
+    "./intents": {
+      "import": {
+        "types": "./dist/intents/index.d.ts",
+        "default": "./dist/intents/index.js"
+      }
+    },
+    "./intents/client": {
+      "import": {
+        "types": "./dist/intents/client/index.d.ts",
+        "default": "./dist/intents/client/index.js"
+      }
+    },
+    "./intents/server": {
+      "import": {
+        "types": "./dist/intents/server/index.d.ts",
+        "default": "./dist/intents/server/index.js"
       }
     },
     "./paywall": {
