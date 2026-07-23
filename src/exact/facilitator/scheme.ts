@@ -28,6 +28,12 @@ const MATCH_LOOKAHEAD_MS = 30 * 1000;
 const MATCH_ATTEMPTS = 5;
 const MATCH_RETRY_DELAY_MS = 500;
 const MAX_CLOCK_SKEW_MS = 30 * 1000;
+// A payment can pass verify() in the last millisecond of its TTL and still
+// take submit plus confirmation latency to appear in the ledger, with the
+// exchange clock skewed relative to ours. The window is only a candidate
+// pre-filter — confirmTransaction still pins the exact signed nonce — so the
+// late side gets skew plus a latency allowance rather than a hard cutoff.
+const MATCH_WINDOW_LATE_GRACE_MS = MAX_CLOCK_SKEW_MS + MATCH_LOOKAHEAD_MS;
 
 type HyperliquidExchangeResponse = {
   status: string;
@@ -481,7 +487,10 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     if (
       expected.nonce != null &&
       (update.time < expected.nonce - MAX_CLOCK_SKEW_MS ||
-        update.time > expected.nonce + expected.requirements.maxTimeoutSeconds * 1000)
+        update.time >
+          expected.nonce +
+            expected.requirements.maxTimeoutSeconds * 1000 +
+            MATCH_WINDOW_LATE_GRACE_MS)
     ) {
       return false;
     }

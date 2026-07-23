@@ -1274,7 +1274,11 @@ function createIntentExecutor(config) {
         config.store,
         record,
         executionClaimToken,
-        executed
+        executed,
+        {
+          executionNetwork: execution.network,
+          executionTransaction: execution.transaction
+        }
       );
     },
     async retryRefund(intentHash) {
@@ -1617,7 +1621,7 @@ async function runRefund(config, input, createClaimToken) {
   });
   return failed.kind === "updated" ? failed.record : recordFromConflict(failed, record);
 }
-async function markManualAfterStoreConflict(store, record, claimToken, conflict) {
+async function markManualAfterStoreConflict(store, record, claimToken, conflict, evidence) {
   if (conflict.kind === "conflict" && conflict.record.revision !== record.revision) {
     return conflict.record;
   }
@@ -1629,10 +1633,11 @@ async function markManualAfterStoreConflict(store, record, claimToken, conflict)
       "store_conflict",
       "Durable store rejected transaction evidence; reconcile manually",
       false
-    )
+    ),
+    evidence
   );
 }
-async function markManualIntervention(store, record, claimToken, failure2) {
+async function markManualIntervention(store, record, claimToken, failure2, evidence) {
   const manual = await store.transition({
     intentHash: record.intentHash,
     expectedRevision: record.revision,
@@ -1640,11 +1645,16 @@ async function markManualIntervention(store, record, claimToken, failure2) {
     to: "manual_intervention",
     claimToken,
     patch: {
+      ...evidence,
       claimToken: void 0,
       failure: failure2
     }
   });
-  return manual.kind === "updated" ? manual.record : recordFromConflict(manual, record);
+  if (manual.kind === "updated") return manual.record;
+  if (evidence && manual.kind === "conflict" && manual.record.revision === record.revision) {
+    return markManualIntervention(store, record, claimToken, failure2);
+  }
+  return recordFromConflict(manual, record);
 }
 function safeFailure(reason, message, retryable) {
   return { reason, message, retryable };

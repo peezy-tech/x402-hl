@@ -1323,3 +1323,58 @@ test("a confirmed execution without a transaction string requires manual interve
   assert.equal(receipt.failure?.reason, "execution_uncertain");
   assert.equal(refundCalls, 0);
 });
+
+test("a store conflict on the executed transition preserves the confirmed receipt", async () => {
+  const fixture = await makeFixture();
+  const backing = new InMemoryIntentExecutionStore();
+  let rejectedExecuted = false;
+  const store: IntentExecutionStore = {
+    registerPaid: record => backing.registerPaid(record),
+    get: intentHash => backing.get(intentHash),
+    async transition(transition) {
+      if (transition.to === "executed" && !rejectedExecuted) {
+        rejectedExecuted = true;
+        const current = await backing.get(transition.intentHash);
+        return {
+          kind: "conflict",
+          key: "execution_transaction",
+          record: current!,
+        };
+      }
+      return backing.transition(transition);
+    },
+  };
+  const executor = createIntentExecutor(executorConfig(store));
+
+  const receipt = await executor.execute(executionInput(fixture));
+  assert.equal(receipt.status, "manual_intervention");
+  assert.equal(receipt.failure?.reason, "store_conflict");
+  assert.equal(receipt.executionTransaction, EXECUTION_TX);
+  assert.equal(receipt.executionNetwork, "eip155:998");
+});
+
+test("a record still parks manually when the store also rejects the receipt evidence", async () => {
+  const fixture = await makeFixture();
+  const backing = new InMemoryIntentExecutionStore();
+  const store: IntentExecutionStore = {
+    registerPaid: record => backing.registerPaid(record),
+    get: intentHash => backing.get(intentHash),
+    async transition(transition) {
+      if (transition.patch?.executionTransaction) {
+        const current = await backing.get(transition.intentHash);
+        return {
+          kind: "conflict",
+          key: "execution_transaction",
+          record: current!,
+        };
+      }
+      return backing.transition(transition);
+    },
+  };
+  const executor = createIntentExecutor(executorConfig(store));
+
+  const receipt = await executor.execute(executionInput(fixture));
+  assert.equal(receipt.status, "manual_intervention");
+  assert.equal(receipt.failure?.reason, "store_conflict");
+  assert.equal(receipt.executionTransaction, undefined);
+});

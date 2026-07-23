@@ -20,6 +20,7 @@ import {
 import type {
   IntentExecutionRecord,
   IntentExecutionStore,
+  IntentExecutionTransitionPatch,
   IntentStoreTransitionResult,
 } from "./store";
 
@@ -391,11 +392,17 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
       });
       if (executed.kind === "updated") return executed.record;
 
+      // Keep the confirmed receipt on the parked record so operators do not
+      // have to re-derive it through the adapter idempotency key.
       return markManualAfterStoreConflict(
         config.store,
         record,
         executionClaimToken,
         executed,
+        {
+          executionNetwork: execution.network,
+          executionTransaction: execution.transaction,
+        },
       );
     },
 
@@ -819,6 +826,7 @@ async function markManualAfterStoreConflict(
   record: IntentExecutionRecord,
   claimToken: string,
   conflict: IntentStoreTransitionResult,
+  evidence?: IntentExecutionTransitionPatch,
 ): Promise<IntentExecutionRecord> {
   if (conflict.kind === "conflict" && conflict.record.revision !== record.revision) {
     return conflict.record;
@@ -832,6 +840,7 @@ async function markManualAfterStoreConflict(
       "Durable store rejected transaction evidence; reconcile manually",
       false,
     ),
+    evidence,
   );
 }
 
@@ -840,6 +849,7 @@ async function markManualIntervention(
   record: IntentExecutionRecord,
   claimToken: string | undefined,
   failure: IntentFailure,
+  evidence?: IntentExecutionTransitionPatch,
 ): Promise<IntentExecutionRecord> {
   const manual = await store.transition({
     intentHash: record.intentHash,
@@ -848,13 +858,23 @@ async function markManualIntervention(
     to: "manual_intervention",
     claimToken,
     patch: {
+      ...evidence,
       claimToken: undefined,
       failure,
     },
   });
-  return manual.kind === "updated"
-    ? manual.record
-    : recordFromConflict(manual, record);
+  if (manual.kind === "updated") return manual.record;
+  // The store may reject the receipt evidence itself (for example a unique
+  // execution-transaction index); parking the record still matters more than
+  // preserving the receipt, so retry once without it.
+  if (
+    evidence &&
+    manual.kind === "conflict" &&
+    manual.record.revision === record.revision
+  ) {
+    return markManualIntervention(store, record, claimToken, failure);
+  }
+  return recordFromConflict(manual, record);
 }
 
 function safeFailure(

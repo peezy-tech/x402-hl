@@ -158,4 +158,22 @@ test("facilitator recognizes the public spotTransfer ledger candidate shape", ()
     ),
     false,
   );
+
+  const ttlMs = requirements.maxTimeoutSeconds * 1000;
+  // A transfer that executes just after the TTL (verify passed at the last
+  // millisecond, then submit and confirmation latency) must still match.
+  assert.equal(
+    facilitator.ledgerUpdateMatchesPayment(
+      { ...update, time: nonce + ttlMs + 5_000 },
+      expected,
+    ),
+    true,
+  );
+  assert.equal(
+    facilitator.ledgerUpdateMatchesPayment(
+      { ...update, time: nonce + ttlMs + 120_000 },
+      expected,
+    ),
+    false,
+  );
 });

@@ -223,6 +223,7 @@ var MATCH_LOOKAHEAD_MS = 30 * 1e3;
 var MATCH_ATTEMPTS = 5;
 var MATCH_RETRY_DELAY_MS = 500;
 var MAX_CLOCK_SKEW_MS = 30 * 1e3;
+var MATCH_WINDOW_LATE_GRACE_MS = MAX_CLOCK_SKEW_MS + MATCH_LOOKAHEAD_MS;
 var ExactHyperliquidScheme2 = class {
   scheme = "exact";
   caipFamily = HYPERLIQUID_WILDCARD_CAIP2;
@@ -539,7 +540,7 @@ var ExactHyperliquidScheme2 = class {
     const exactSend = delta.type === "send" && delta.sourceDex === "spot" && delta.destinationDex === "spot" && delta.nonce === expected.nonce;
     const spotTransfer = delta.type === "spotTransfer" && delta.nonce == null && delta.sourceDex == null && delta.destinationDex == null;
     if (!exactSend && !spotTransfer) return false;
-    if (expected.nonce != null && (update.time < expected.nonce - MAX_CLOCK_SKEW_MS || update.time > expected.nonce + expected.requirements.maxTimeoutSeconds * 1e3)) {
+    if (expected.nonce != null && (update.time < expected.nonce - MAX_CLOCK_SKEW_MS || update.time > expected.nonce + expected.requirements.maxTimeoutSeconds * 1e3 + MATCH_WINDOW_LATE_GRACE_MS)) {
       return false;
     }
     if (delta.user.toLowerCase() !== expected.payer.toLowerCase()) return false;
