@@ -347,6 +347,7 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
       const expectedExecutionNetwork = `eip155:${record.intent.chainId}`;
       if (
         execution.confirmed !== true ||
+        typeof execution.transaction !== "string" ||
         !execution.transaction.trim() ||
         execution.network !== expectedExecutionNetwork
       ) {
@@ -618,7 +619,9 @@ async function runRefund(
   if (refund.success) {
     if (
       refund.confirmed !== true ||
+      typeof refund.transaction !== "string" ||
       !refund.transaction.trim() ||
+      typeof refund.network !== "string" ||
       !refund.network.trim()
     ) {
       return markManualIntervention(

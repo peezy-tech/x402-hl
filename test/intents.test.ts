@@ -26,6 +26,7 @@ import {
 } from "../src/intents/server/index";
 import type {
   IntentExecutionContext,
+  IntentExecutionResult,
   IntentExecutorConfig,
   IntentPolicyDecision,
   IntentSimulationResult,
@@ -905,6 +906,36 @@ test("an uncertain destination outcome requires manual intervention without refu
         refundSafe: false,
         mayHaveSucceeded: true,
       }),
+      refund: async () => {
+        refundCalls += 1;
+        return {
+          success: true,
+          confirmed: true,
+          transaction: REFUND_TX,
+          network: "hyperliquid:testnet",
+        };
+      },
+    }),
+  );
+
+  const receipt = await executor.execute(executionInput(fixture));
+  assert.equal(receipt.status, "manual_intervention");
+  assert.equal(receipt.failure?.reason, "execution_uncertain");
+  assert.equal(refundCalls, 0);
+});
+
+test("a confirmed execution without a transaction string requires manual intervention", async () => {
+  const fixture = await makeFixture();
+  let refundCalls = 0;
+  const executor = createIntentExecutor(
+    executorConfig(new InMemoryIntentExecutionStore(), {
+      // A plain-JS adapter can violate the typed contract at runtime.
+      execute: async () =>
+        ({
+          success: true,
+          confirmed: true,
+          network: "eip155:998",
+        }) as unknown as IntentExecutionResult,
       refund: async () => {
         refundCalls += 1;
         return {

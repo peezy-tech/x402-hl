@@ -40,6 +40,13 @@ Notable changes to `x402-hl` are recorded here.
   hash, and confirmed settlement evidence.
 - `createIntentExecutor` requires a durable store plus policy, simulation,
   execution, and refund adapters. The in-memory store is development/test only.
+- Exact-scheme `settle()` is now idempotent across restarts: it reconciles
+  against confirmed ledger updates before submitting, so re-presenting an
+  already-settled payment payload returns `success: true` with the original
+  transaction hash instead of failing with `hl_exchange_error` on the
+  exchange's duplicate-nonce rejection (the 0.1.x behavior). Integrators who
+  treated a settle failure as their replay boundary must deduplicate on the
+  returned transaction or payload nonce instead.
 
 ### Security
 

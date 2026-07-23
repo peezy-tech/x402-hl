@@ -218,12 +218,15 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
 
     try {
       // Reconcile before submitting so a process restart does not blindly
-      // replay an already-settled signed action.
+      // replay an already-settled signed action. A fresh payment has nothing
+      // to reconcile, so a single lookup keeps the happy path fast; the
+      // retried polling only belongs in the post-submit confirmation below.
       const existingHash = await this.findConfirmedTransaction(
         infoClient,
         payer,
         exactPayload,
         requirements,
+        1,
       );
       if (existingHash) {
         return {
@@ -351,6 +354,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     payer: string,
     payload: ExactHyperliquidPayload,
     requirements: PaymentRequirements,
+    attempts: number = MATCH_ATTEMPTS,
   ): Promise<string | undefined> {
     const action = payload.action as Record<string, unknown>;
     const destination = typeof action.destination === "string" ? action.destination : undefined;
@@ -361,7 +365,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     const decimals = await this.resolveDecimals(requirements);
     const startTime = Math.max(0, payload.nonce - MATCH_LOOKBACK_MS);
 
-    for (let attempt = 0; attempt < MATCH_ATTEMPTS; attempt++) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
       try {
         const updates = await client.userNonFundingLedgerUpdates({
           user: payer as `0x${string}`,
@@ -395,7 +399,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
         }
       } catch {}
 
-      if (attempt < MATCH_ATTEMPTS - 1) {
+      if (attempt < attempts - 1) {
         await new Promise(r => setTimeout(r, MATCH_RETRY_DELAY_MS));
       }
     }
