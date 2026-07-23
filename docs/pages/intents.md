@@ -1,137 +1,325 @@
 ---
 title: Execution Intents
-description: Bind a Hyperliquid x402 payment to a signed HyperEVM execution intent.
+description: Bind a finalized HyperCore x402 payment to a constrained, brokered HyperEVM execution saga.
 ---
 
 # Execution Intents
 
-`x402-hl/intents` is the TypeScript layer for apps that accept payment on
-HyperCore, then execute a quoted action on HyperEVM.
+`x402-hl/intents` version 2 lets an application quote an action on HyperEVM,
+settle its payment on HyperCore, and run the action through an application-owned
+gateway. The gateway is a trusted broker. This flow is not an atomic
+cross-chain transaction and does not make arbitrary calldata safe.
 
-The package keeps payment and execution separate:
+The supported sequence is:
 
 ```txt
-quote action -> advertise x402 payment + intent declaration
-client signs Hyperliquid payment + EIP-712 execution intent
-server settles payment
-server verifies intent signature and quote binding
-server executes with its own TypeScript relayer or records status
+create and persist quote
+  -> advertise x402 PaymentRequirements + intent template
+  -> client approves the application/gateway domain
+  -> client signs the exact finalized PaymentRequirements hash + intent
+  -> settle the HyperCore payment
+  -> verify settlement, domain, quote, template, payment hash, and signer
+  -> atomically register the paid intent in a durable store
+  -> claim -> policy/decode -> simulate -> submit -> confirm
+  -> executed, or a confirmed refund, or manual intervention
 ```
 
-The Solidity verifier/router pieces are intentionally not included yet.
+Version 1 was an unpublished draft. Version 2 is deliberately brokered-only;
+the package does not include a Solidity router, smart-account executor, bridge,
+or inventory manager.
 
-## Exports
+## Security Contract
+
+Every deployment must configure the same `ExecutionIntentDomain` on the client
+and gateway:
 
 ```ts
-import {
-  createIntentDeclaration,
-  hashExecutionIntent,
-  signExecutionIntent,
-} from "x402-hl/intents";
-import { createExecutionIntentClientExtension } from "x402-hl/intents/client";
-import {
-  createIntentExecutor,
-  createIntentQuote,
-  verifyPaidExecutionIntent,
-} from "x402-hl/intents/server";
+import type { ExecutionIntentDomain } from "x402-hl/intents";
+
+export const intentDomain = {
+  application: "com.example.mint/v1",
+  gateway: "0x1111111111111111111111111111111111111111",
+} satisfies ExecutionIntentDomain;
 ```
 
-## Create A Quote
+`application` is a stable application and environment identifier. `gateway` is
+the stable EVM address used as the EIP-712 verifying-contract domain value.
+Clients must obtain both values from trusted local configuration, not copy them
+blindly from a `402` response.
 
-On the server, create a quote for the exact action you are willing to execute.
-The route config includes normal `exact` Hyperliquid payment details plus an
-intent declaration under the `x402-hl/intents` extension key.
+The version-2 signature commits to:
+
+- the application, gateway, user, execution chain, target, calldata hash,
+  native value, recipient, refund address, gas/slippage limits, deadline,
+  nonce, quote id, and metadata hash;
+- a canonical hash of the selected, finalized `PaymentRequirements`, including
+  its scheme, network, asset, amount, payee, timeout, and complete `extra`
+  object.
+
+The quote uses an `intentTemplateHash` before finalized payment requirements
+exist. The final client signature uses a non-zero `paymentRequirementsHash`.
+Never treat a template hash as authorization to execute.
+
+## Create And Persist A Quote
+
+Create a unique quote id, persist the quoted intent and expiry in application
+storage, then install the returned `routeConfig` on the exact route that serves
+the quote:
 
 ```ts
+import { createIntentQuote } from "x402-hl/intents/server";
+
 const quote = createIntentQuote({
-  id: "quote-123",
+  id: crypto.randomUUID(),
   network: "hyperliquid:testnet",
   price: "$0.05",
   payTo: process.env.HYPERLIQUID_PAY_TO_ADDRESS!,
-  mode: "brokered",
+  description: "Allowlisted mint",
   intent: {
+    application: intentDomain.application,
+    gateway: intentDomain.gateway,
     user: userAddress,
     chainId: 998,
-    target: nftContract,
-    callData: mintCallData,
+    target: mintContract,
+    callData: canonicalMintCallData,
     value: "0",
     recipient: userAddress,
+    refundAddress: userAddress,
+    maxGasCost: "1000000000000000",
+    maxSlippageBps: 0,
     deadline: Math.floor(Date.now() / 1000) + 300,
     nonce: crypto.randomUUID(),
     metadata: { action: "mint" },
   },
 });
 
+await quoteStore.insert({
+  id: quote.id,
+  intentTemplateHash: quote.intentTemplateHash,
+  intent: quote.intent,
+});
+
 routes[`POST /x402/execute/${quote.id}`] = quote.routeConfig;
 ```
 
-## Sign On The Client
+Do not reconstruct `expectedQuoteId` or `expectedIntentTemplateHash` from the
+request at execution time. Read the values from the server-side quote record.
 
-Register the normal Hyperliquid exact scheme plus the intent extension. When
-the server's 402 response declares an execution intent, the extension signs it
-and attaches the signed intent to the x402 payment payload.
+## Approve And Sign On The Client
+
+Register the normal Hyperliquid exact scheme and the intent extension. The
+client extension hashes the exact `PaymentRequirements` selected by
+`@x402/core`; it refuses a requirement that was not advertised by the server.
 
 ```ts
+import { x402Client } from "@x402/core/client";
+import { ExactHyperliquidScheme } from "x402-hl/exact/client";
+import {
+  createExecutionIntentClientExtension,
+} from "x402-hl/intents/client";
+
 const client = new x402Client()
   .register("hyperliquid:testnet", new ExactHyperliquidScheme(wallet))
-  .registerExtension(createExecutionIntentClientExtension({ signer: wallet }));
+  .registerExtension(
+    createExecutionIntentClientExtension({
+      signer: wallet,
+      domain: intentDomain,
+      approve(intent) {
+        return (
+          intent.chainId === 998 &&
+          intent.target.toLowerCase() === mintContract.toLowerCase() &&
+          intent.recipient.toLowerCase() === wallet.address.toLowerCase()
+        );
+      },
+    }),
+  );
 ```
 
-The signer is expected to support EIP-712 `signTypedData`. For most browser
-wallet clients and `viem` local accounts, the same EVM address can sign both the
-Hyperliquid payment action and the execution intent.
+An application can supply an exact `intent` or `IntentResolver` instead of an
+approval callback. Either way, show the target action, amount, recipient,
+deadline, and refund address to the user before signing. The signer must support
+EIP-712 `signTypedData`, and the intent user must equal the recovered signer.
 
-## Verify And Execute
+## Verify Only After Settlement
 
-After x402 settlement succeeds, verify that the signed intent matches the
-quoted requirement and the settled payer.
+`verifyPaidExecutionIntent` requires a successful settlement with a payer,
+transaction identifier, and matching network. It also requires locally trusted
+domain, quote id, and template hash values:
 
 ```ts
+import {
+  verifyPaidExecutionIntent,
+} from "x402-hl/intents/server";
+
 const verified = await verifyPaidExecutionIntent({
   paymentPayload,
   paymentRequirements,
   settleResponse,
+  expectedDomain: intentDomain,
+  expectedQuoteId: persistedQuote.id,
+  expectedIntentTemplateHash: persistedQuote.intentTemplateHash,
 });
 
 if (!verified.ok) {
-  throw new Error(verified.reason);
+  throw new Error(`${verified.reason}: ${verified.message}`);
 }
 ```
 
-For a pure TypeScript gateway, provide an executor function. This is where your
-app simulates the call, checks allowlists, submits a HyperEVM transaction, and
-returns the execution transaction hash.
+Verification fails on missing or unsuccessful settlement, a changed payment
+requirement, mismatched domain/quote/template, expired intent, invalid
+signature, or a payer/signer mismatch. Keep `requireSamePayer` enabled unless
+the application has an explicit, separately reviewed delegated-payer design.
+
+## Durable Store And State Machine
+
+Production gateways must implement the asynchronous `IntentExecutionStore`:
 
 ```ts
-const executor = createIntentExecutor({
-  async execute(context) {
-    const tx = await walletClient.sendTransaction({
-      to: context.intent.target,
-      data: context.intent.callData,
-      value: BigInt(context.intent.value),
-    });
-
-    return {
-      transaction: tx,
-      network: `eip155:${context.intent.chainId}`,
-    };
-  },
-});
-
-const receipt = await executor.execute({
-  paymentPayload,
-  paymentRequirements,
-  settleResponse,
-});
+interface IntentExecutionStore {
+  registerPaid(
+    record: IntentExecutionRecord,
+  ): Promise<IntentStoreRegistrationResult>;
+  get(intentHash: string): Promise<IntentExecutionRecord | undefined>;
+  transition(
+    transition: IntentExecutionTransition,
+  ): Promise<IntentStoreTransitionResult>;
+}
 ```
 
-## Trust Model
+`registerPaid` must atomically enforce uniqueness for:
 
-This first release supports TypeScript gateways. That makes the operator or app
-server the HyperEVM transaction sender, so it is best for brokered execution,
-allowlisted mints, swaps with explicit recipients, and other flows where the app
-can define safe target/call-data policy.
+- intent hash;
+- `(application, gateway, quoteId)`;
+- `(paymentNetwork, paymentTransaction)`;
+- execution and refund transaction identifiers when they are recorded.
 
-Use the intent hash and quote id as idempotency keys. Store both the Hyperliquid
-payment transaction and the HyperEVM execution transaction so users can see
-whether the flow is paid, executing, executed, failed, or refunded.
+`transition` is a compare-and-swap over revision, current status, and claim
+token. Back it with a database transaction and unique indexes. A read followed
+by an unconditional update is not sufficient.
+
+The state machine is:
+
+```txt
+paid
+  -> execution_claimed
+  -> execution_submitted
+  -> executed
+
+execution_claimed | execution_submitted
+  -> execution_failed
+  -> refund_pending
+  -> refund_claimed
+  -> refund_submitted
+  -> refunded | refund_failed
+
+uncertain execution, uncertain refund, or unreconciled store conflict
+  -> manual_intervention
+```
+
+`executed`, `refunded`, and `manual_intervention` are terminal. A
+`refund_failed` record can be retried explicitly with `retryRefund`.
+`InMemoryIntentExecutionStore` implements the contract for tests and
+single-process development only. It is not durable and must not be used as a
+production replay boundary.
+
+## Policy, Simulation, Execution, And Refund
+
+`createIntentExecutor` requires every production boundary explicitly:
+
+```ts
+import {
+  createIntentExecutor,
+  type IntentExecutorConfig,
+} from "x402-hl/intents/server";
+
+const executor = createIntentExecutor({
+  store: durableStore,
+  domain: intentDomain,
+  policy: authorizeExactCall,
+  simulate: simulateExactCall,
+  execute: submitAndConfirmExactCall,
+  refund: submitAndConfirmRefund,
+} satisfies IntentExecutorConfig);
+```
+
+The policy callback must decode calldata with the canonical ABI, reject unknown
+targets and selectors, validate every action-specific argument, re-encode the
+call to reject non-canonical calldata, and return evidence for the exact chain,
+target, selector, calldata hash, value, and recipient.
+
+Simulation must evaluate that same call from the real relayer account against
+current chain state. Return exact binding evidence plus estimated gas cost and
+slippage; the executor rejects evidence outside the signed limits.
+
+Execution is successful only after the adapter returns a confirmed successful
+receipt on `eip155:<intent.chainId>`. A transaction hash alone is not success.
+Adapters must use the supplied `idempotencyKey` and reconcile a timeout before
+retrying.
+
+Refunds are application operations, not an automatic Hyperliquid protocol
+feature. A refund adapter must return funds to the signed `refundAddress`,
+confirm the refund transaction or ledger update, and use its separate
+`<intentHash>:refund` idempotency key. If execution or refund may have
+succeeded, return an uncertain result; the state machine moves to
+`manual_intervention` instead of risking a double execution or double refund.
+
+See [Production sample](./production-sample) for the complete gateway shape.
+
+## Brokered Trust And Inventory
+
+HyperCore payment and HyperEVM execution are separate operations:
+
+- the user pays first, and a later destination action can fail;
+- the operator controls the relayer, policy, durable store, monitoring, and
+  refund path;
+- the signed intent constrains what the operator is authorized to do, but
+  cannot force timely execution or refund;
+- there is no atomic rollback across HyperCore and HyperEVM.
+
+Keep the HyperEVM relayer pre-funded with the gas and action inventory needed to
+honor accepted quotes. HyperCore receipts do not become HyperEVM inventory
+automatically. Treat HyperCore-to-HyperEVM transfers or bridging as a separate,
+asynchronous treasury-rebalancing process. Do not accept a quote based on an
+unconfirmed future rebalance. Monitor available inventory, reserved inventory,
+outstanding paid intents, refund liquidity, and relayer gas before advertising
+new quotes.
+
+## API Reference
+
+The three entry points are ESM exports with TypeScript declarations.
+`x402-hl/intents/client` and `x402-hl/intents/server` re-export the complete
+common `x402-hl/intents` surface.
+
+### `x402-hl/intents`
+
+| Group | Public exports |
+| --- | --- |
+| Wire constants | `X402_HL_INTENTS_EXTENSION`, `X402_HL_INTENTS_EXTRA_KEY`, `X402_HL_INTENT_VERSION`, `X402_HL_INTENT_DOMAIN_NAME`, `X402_HL_INTENT_DOMAIN_VERSION`, `X402_HL_INTENT_PRIMARY_TYPE`, `X402_HL_INTENT_TYPES`, `ZERO_ADDRESS`, `ZERO_BYTES32` |
+| Schemas | `HexSchema`, `Bytes32Schema`, `EvmAddressSchema`, `NonZeroEvmAddressSchema`, `DecimalIntegerStringSchema`, `IntentApplicationSchema`, `JsonValueSchema`, `JsonRecordSchema`, `IntentExecutionModeSchema`, `ExecutionIntentDomainSchema`, `HyperEvmExecutionIntentSchema`, `SignedHyperEvmExecutionIntentSchema`, `IntentDeclarationSchema`, `IntentPaymentExtraSchema`, `IntentExecutionStatusSchema`, `IntentFailureReasonSchema`, `IntentFailureSchema`, `IntentExecutionReceiptSchema` |
+| Schema-derived types | `JsonValue`, `IntentExecutionMode`, `ExecutionIntentDomain`, `HyperEvmExecutionIntent`, `HyperEvmExecutionIntentInput`, `SignedHyperEvmExecutionIntent`, `IntentDeclaration`, `IntentPaymentExtra`, `IntentExecutionStatus`, `IntentFailureReason`, `IntentFailure`, `IntentExecutionReceipt` |
+| Canonical JSON and typed data | `stableJson`, `ExecutionIntentPaymentBinding`, `normalizeExecutionIntent`, `hashIntentMetadata`, `hashIntentText`, `normalizeBytes32`, `buildExecutionIntentTypedData`, `hashExecutionIntent`, `hashExecutionIntentTemplate` |
+| Payment binding | `CanonicalPaymentRequirements`, `IntentBindingFailure`, `IntentBindingResult`, `canonicalizePaymentRequirements`, `hashPaymentRequirements`, `createIntentPaymentExtra`, `readIntentPaymentExtra`, `verifyIntentPaymentExtra` |
+| Signing | `IntentSigner`, `SignExecutionIntentOptions`, `getIntentSignerAddress`, `signExecutionIntent`, `recoverExecutionIntentSigner`, `verifyExecutionIntentSignature` |
+| Extensions | `IntentDeclarationOptions`, `createIntentDeclaration`, `readIntentDeclaration`, `attachSignedExecutionIntent`, `readSignedExecutionIntent` |
+| Status helpers | `TERMINAL_INTENT_EXECUTION_STATUSES`, `isTerminalIntentExecutionStatus` |
+
+### `x402-hl/intents/client`
+
+In addition to every common export:
+
+| Kind | Public exports |
+| --- | --- |
+| Types | `IntentResolver`, `IntentApproval`, `ExecutionIntentClientExtensionConfig` |
+| Functions | `signDeclaredExecutionIntent`, `createExecutionIntentClientExtension` |
+
+### `x402-hl/intents/server`
+
+In addition to every common export:
+
+| Group | Public exports |
+| --- | --- |
+| Quote | `IntentQuoteInput`, `ResolvedIntentQuote`, `createIntentQuote` |
+| Verification | `PaidIntentVerificationInput`, `VerifiedPaidExecutionIntent`, `PaidIntentVerificationResult`, `verifyPaidExecutionIntent`, `assertPaidExecutionIntent` |
+| Durable store | `IntentExecutionRecordSchema`, `IntentExecutionRecord`, `IntentStoreConflictKey`, `IntentStoreRegistrationResult`, `IntentExecutionTransitionPatch`, `IntentExecutionTransition`, `IntentStoreTransitionResult`, `IntentExecutionStore`, `InMemoryIntentExecutionStore`, `isLegalIntentExecutionTransition` |
+| Executor types | `IntentExecutionContext`, `IntentPolicyDecision`, `IntentSimulationResult`, `IntentExecutionResult`, `IntentRefundContext`, `IntentRefundResult`, `IntentExecutorConfig` |
+| Executor runtime | `IntentStoreConflictError`, `createIntentExecutor` |

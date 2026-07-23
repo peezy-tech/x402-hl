@@ -15,7 +15,9 @@ It includes:
   requirements;
 - exact facilitator support for verifying and settling signed Hyperliquid
   payments;
-- a browser injected-wallet paywall handler for upstream `@x402/paywall`.
+- a browser injected-wallet paywall handler for upstream `@x402/paywall`;
+- version-2 brokered execution intents that bind a finalized HyperCore x402
+  payment to an application- and gateway-scoped HyperEVM action.
 
 ## Install
 
@@ -41,12 +43,27 @@ pnpm add @x402/fetch viem
 - `x402-hl/exact/client`: `ExactHyperliquidScheme` for clients.
 - `x402-hl/exact/server`: `ExactHyperliquidScheme` for resource servers.
 - `x402-hl/exact/facilitator`: `ExactHyperliquidScheme` for facilitators.
-- `x402-hl/intents`: execution-intent schemas, hashing, and EIP-712 helpers.
-- `x402-hl/intents/client`: a client extension for signing declared execution
-  intents alongside an x402 payment.
-- `x402-hl/intents/server`: quote, route, verification, execution, and status
-  helpers for TypeScript gateways.
+- `x402-hl/intents`: versioned schemas, canonical payment hashing, EIP-712
+  signing, and extension helpers.
+- `x402-hl/intents/client`: client approval and signing of a declared intent
+  bound to the exact selected payment requirements.
+- `x402-hl/intents/server`: quote, strict post-settlement verification, durable
+  compare-and-swap storage, constrained execution, status, and refund helpers.
 - `x402-hl/paywall`: `hyperliquidPaywall` for upstream `@x402/paywall`.
+
+The [execution-intent guide](./intents) lists every public intents export and
+type.
+
+## Network Support And Evidence
+
+The exact scheme implementation supports `hyperliquid:testnet` and
+`hyperliquid:mainnet`. The related HyperEVM chain ids are 998 and 999,
+respectively.
+
+Funded evidence is narrower than code support. Successful x402 settlements are
+recorded on testnet. The recorded mainnet attempt failed, and no funded
+HyperEVM execution-intent smoke is recorded on either network. See
+[Facilitator integration](./facilitator#networks) for the evidence matrix.
 
 ## Start Here
 
@@ -54,6 +71,7 @@ pnpm add @x402/fetch viem
   settlement to an x402 facilitator.
 - [Accept Hyperliquid payments](./endpoint): configure an HTTP endpoint that
   accepts `hyperliquid:testnet`.
-- [Execution intents](./intents): bind HyperCore payment to HyperEVM execution.
-- [Production sample](./production-sample): deploy a small app that proves the
-  full stack.
+- [Execution intents](./intents): understand the version-2 signature, strict
+  verification, state machine, and brokered trust boundary.
+- [Production sample](./production-sample): assemble a durable, allowlisted,
+  simulated, receipt-confirmed execution and refund saga.
