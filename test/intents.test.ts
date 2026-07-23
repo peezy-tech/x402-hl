@@ -14,6 +14,7 @@ import {
   hashExecutionIntent,
   hashIntentMetadata,
   hashIntentText,
+  HyperEvmExecutionIntentSchema,
   type IntentDeclaration,
   type IntentExecutionStatus,
   normalizeExecutionIntent,
@@ -22,6 +23,7 @@ import {
   stableJson,
   verifyExecutionIntentSignature,
   X402_HL_INTENTS_EXTENSION,
+  ZERO_ADDRESS,
 } from "../src/intents/index";
 import { signDeclaredExecutionIntent } from "../src/intents/client/index";
 import {
@@ -525,6 +527,66 @@ test("malformed intent extension returns a typed failure", async () => {
     },
   });
   assertFailure(result, "malformed_extension_payload");
+});
+
+test("intent metadata mismatching its metadataHash returns a typed failure", async () => {
+  const fixture = await makeFixture();
+  const result = await verifyPaidExecutionIntent({
+    ...verificationInput(fixture),
+    paymentPayload: {
+      ...fixture.paymentPayload,
+      extensions: {
+        [X402_HL_INTENTS_EXTENSION]: {
+          ...fixture.signedIntent,
+          intent: {
+            ...fixture.signedIntent.intent,
+            metadata: { note: "mismatched" },
+          },
+        },
+      },
+    },
+  });
+  assertFailure(result, "malformed_extension_payload");
+});
+
+test("intent schema rejects zero recipient and refund addresses", async t => {
+  const intent = normalizeExecutionIntent(baseIntent() as never);
+
+  await t.test("schema rejects a zero recipient", () => {
+    const parsed = HyperEvmExecutionIntentSchema.safeParse({
+      ...intent,
+      recipient: ZERO_ADDRESS,
+    });
+    assert.equal(parsed.success, false);
+  });
+
+  await t.test("schema rejects a zero refundAddress", () => {
+    const parsed = HyperEvmExecutionIntentSchema.safeParse({
+      ...intent,
+      refundAddress: ZERO_ADDRESS,
+    });
+    assert.equal(parsed.success, false);
+  });
+
+  await t.test("verification fails closed on a zero refundAddress", async () => {
+    const fixture = await makeFixture();
+    const result = await verifyPaidExecutionIntent({
+      ...verificationInput(fixture),
+      paymentPayload: {
+        ...fixture.paymentPayload,
+        extensions: {
+          [X402_HL_INTENTS_EXTENSION]: {
+            ...fixture.signedIntent,
+            intent: {
+              ...fixture.signedIntent.intent,
+              refundAddress: ZERO_ADDRESS,
+            },
+          },
+        },
+      },
+    });
+    assertFailure(result, "malformed_extension_payload");
+  });
 });
 
 function exactPolicy(context: IntentExecutionContext): IntentPolicyDecision {

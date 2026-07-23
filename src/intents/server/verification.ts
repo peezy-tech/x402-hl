@@ -16,6 +16,7 @@ import { hashPaymentRequirements, verifyIntentPaymentExtra } from "../payment";
 import {
   hashExecutionIntent,
   hashExecutionIntentTemplate,
+  normalizeExecutionIntent,
 } from "../typed-data";
 import { verifyExecutionIntentSignature } from "../signature";
 
@@ -110,6 +111,18 @@ export async function verifyPaidExecutionIntent(
   }
   const signedIntent = parsedSignedIntent.data;
   const intent = signedIntent.intent;
+
+  // Untrusted intents must fail closed rather than throw: normalization
+  // rejects a metadataHash that does not commit to the supplied metadata and
+  // any field the later hashing calls would reject.
+  try {
+    normalizeExecutionIntent(intent);
+  } catch {
+    return failure(
+      "malformed_extension_payload",
+      "Payment payload contains a non-canonical x402-hl execution intent",
+    );
+  }
 
   if (
     signedIntent.paymentRequirementsHash.toLowerCase() !==
