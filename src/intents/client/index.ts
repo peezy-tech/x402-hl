@@ -9,6 +9,7 @@ import {
   IntentDeclaration,
   SignedHyperEvmExecutionIntent,
   X402_HL_INTENTS_EXTENSION,
+  X402_HL_INTENTS_EXTRA_KEY,
 } from "../types";
 import {
   IntentSigner,
@@ -71,6 +72,15 @@ export async function signDeclaredExecutionIntent(
   );
   if (!advertised) {
     throw new Error("Selected payment requirements were not advertised by the server");
+  }
+
+  // An optional declaration binds only intent-committed payment options; a
+  // plain selected requirement proceeds as a normal, intent-free payment.
+  if (
+    !declaration.required &&
+    selected.extra?.[X402_HL_INTENTS_EXTRA_KEY] == null
+  ) {
+    return undefined;
   }
 
   const input = await resolveIntentInput(

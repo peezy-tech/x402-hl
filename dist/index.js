@@ -361,7 +361,8 @@ var ExactHyperliquidScheme2 = class {
         infoClient,
         payer,
         exactPayload,
-        requirements
+        requirements,
+        1
       );
       if (existingHash) {
         return {
@@ -458,7 +459,7 @@ var ExactHyperliquidScheme2 = class {
     }
     return false;
   }
-  async findConfirmedTransaction(client, payer, payload, requirements) {
+  async findConfirmedTransaction(client, payer, payload, requirements, attempts = MATCH_ATTEMPTS) {
     const action = payload.action;
     const destination = typeof action.destination === "string" ? action.destination : void 0;
     const token = typeof action.token === "string" ? action.token : void 0;
@@ -466,7 +467,7 @@ var ExactHyperliquidScheme2 = class {
     if (!destination || !token || !amount) return void 0;
     const decimals = await this.resolveDecimals(requirements);
     const startTime = Math.max(0, payload.nonce - MATCH_LOOKBACK_MS);
-    for (let attempt = 0; attempt < MATCH_ATTEMPTS; attempt++) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
       try {
         const updates = await client.userNonFundingLedgerUpdates({
           user: payer,
@@ -497,7 +498,7 @@ var ExactHyperliquidScheme2 = class {
         }
       } catch {
       }
-      if (attempt < MATCH_ATTEMPTS - 1) {
+      if (attempt < attempts - 1) {
         await new Promise((r) => setTimeout(r, MATCH_RETRY_DELAY_MS));
       }
     }

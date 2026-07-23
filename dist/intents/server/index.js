@@ -1220,7 +1220,7 @@ function createIntentExecutor(config) {
         );
       }
       const expectedExecutionNetwork = `eip155:${record.intent.chainId}`;
-      if (execution.confirmed !== true || !execution.transaction.trim() || execution.network !== expectedExecutionNetwork) {
+      if (execution.confirmed !== true || typeof execution.transaction !== "string" || !execution.transaction.trim() || execution.network !== expectedExecutionNetwork) {
         return markManualIntervention(
           config.store,
           record,
@@ -1264,6 +1264,97 @@ function createIntentExecutor(config) {
         return record;
       }
       return runRefund(config, record, claimToken);
+    },
+    /**
+     * Resume an intent abandoned mid-transition, for example by a process
+     * crash, using the claim token persisted on the record. Adapters are only
+     * invoked after the matching `*_submitted` transition is durably recorded,
+     * so pre-submission states refund safely while post-submission states park
+     * in `manual_intervention` for reconciliation. Call only when no other
+     * executor process can still be driving the intent.
+     */
+    async recover(intentHash) {
+      const record = await config.store.get(intentHash);
+      if (!record) {
+        throw new Error("invalid_state: intent record was not found");
+      }
+      if (isTerminalIntentExecutionStatus(record.status)) return record;
+      switch (record.status) {
+        case "execution_claimed":
+          return failAndRefund(
+            config,
+            record,
+            record.claimToken,
+            safeFailure(
+              "execution_failed",
+              "Execution claim was abandoned before destination submission",
+              false
+            ),
+            claimToken
+          );
+        case "execution_submitted":
+          return markManualIntervention(
+            config.store,
+            record,
+            record.claimToken,
+            safeFailure(
+              "execution_uncertain",
+              "Execution was abandoned after submission began; reconcile before retrying or refunding",
+              false
+            )
+          );
+        case "execution_failed": {
+          const pending = await config.store.transition({
+            intentHash: record.intentHash,
+            expectedRevision: record.revision,
+            from: "execution_failed",
+            to: "refund_pending",
+            claimToken: record.claimToken,
+            patch: { claimToken: void 0 }
+          });
+          if (pending.kind !== "updated") {
+            return recordFromConflict(pending, record);
+          }
+          return runRefund(config, pending.record, claimToken);
+        }
+        case "refund_claimed": {
+          const released = await config.store.transition({
+            intentHash: record.intentHash,
+            expectedRevision: record.revision,
+            from: "refund_claimed",
+            to: "refund_failed",
+            claimToken: record.claimToken,
+            patch: {
+              claimToken: void 0,
+              failure: safeFailure(
+                "refund_failed",
+                "Refund claim was abandoned before submission and may be retried",
+                true
+              )
+            }
+          });
+          if (released.kind !== "updated") {
+            return recordFromConflict(released, record);
+          }
+          return runRefund(config, released.record, claimToken);
+        }
+        case "refund_submitted":
+          return markManualIntervention(
+            config.store,
+            record,
+            record.claimToken,
+            safeFailure(
+              "refund_uncertain",
+              "Refund was abandoned after submission began; reconcile before another attempt",
+              false
+            )
+          );
+        case "refund_pending":
+        case "refund_failed":
+          return runRefund(config, record, claimToken);
+        default:
+          return record;
+      }
     }
   };
 }
@@ -1428,7 +1519,7 @@ async function runRefund(config, input, createClaimToken) {
     );
   }
   if (refund.success) {
-    if (refund.confirmed !== true || !refund.transaction.trim() || !refund.network.trim()) {
+    if (refund.confirmed !== true || typeof refund.transaction !== "string" || !refund.transaction.trim() || typeof refund.network !== "string" || !refund.network.trim()) {
       return markManualIntervention(
         config.store,
         record,

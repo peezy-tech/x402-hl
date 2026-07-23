@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type {
   PaymentPayload,
+  PaymentRequired,
   PaymentRequirements,
   SettleResponse,
 } from "@x402/core/types";
@@ -9,8 +10,11 @@ import type { Hex } from "viem";
 import { keccak256 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import {
+  createIntentDeclaration,
   hashExecutionIntent,
   hashIntentMetadata,
+  type IntentDeclaration,
+  type IntentExecutionStatus,
   normalizeExecutionIntent,
   recoverExecutionIntentSigner,
   signExecutionIntent,
@@ -18,6 +22,7 @@ import {
   verifyExecutionIntentSignature,
   X402_HL_INTENTS_EXTENSION,
 } from "../src/intents/index";
+import { signDeclaredExecutionIntent } from "../src/intents/client/index";
 import {
   createIntentExecutor,
   createIntentQuote,
@@ -922,6 +927,242 @@ test("an uncertain destination outcome requires manual intervention without refu
   assert.equal(receipt.status, "manual_intervention");
   assert.equal(receipt.failure?.reason, "execution_uncertain");
   assert.equal(refundCalls, 0);
+});
+
+function declaredPaymentRequired(
+  fixture: Fixture,
+  declaration: IntentDeclaration,
+  plainRequirements: PaymentRequirements,
+): PaymentRequired {
+  return {
+    x402Version: 2,
+    resource: { url: "https://example.com/x402/execute" },
+    accepts: [
+      structuredClone(plainRequirements),
+      structuredClone(fixture.paymentRequirements),
+    ],
+    extensions: { [X402_HL_INTENTS_EXTENSION]: declaration },
+  };
+}
+
+function selectionPayload(requirements: PaymentRequirements): PaymentPayload {
+  return {
+    x402Version: 2,
+    accepted: structuredClone(requirements),
+    payload: { user: account.address },
+  };
+}
+
+test("the client honors optional and required intent declarations", async t => {
+  const fixture = await makeFixture();
+  const plainRequirements = structuredClone(fixture.paymentRequirements);
+  delete plainRequirements.extra.x402HlIntent;
+
+  await t.test("required: false lets a plain payment proceed unsigned", async () => {
+    const declaration = createIntentDeclaration(fixture.quote.intent, {
+      required: false,
+    });
+    let approveCalls = 0;
+    const signed = await signDeclaredExecutionIntent(
+      selectionPayload(plainRequirements),
+      declaredPaymentRequired(fixture, declaration, plainRequirements),
+      {
+        signer: account,
+        domain: DOMAIN,
+        approve: () => {
+          approveCalls += 1;
+          return true;
+        },
+      },
+    );
+    assert.equal(signed, undefined);
+    assert.equal(approveCalls, 0);
+  });
+
+  await t.test("required: false still signs an intent-bound selection", async () => {
+    const declaration = createIntentDeclaration(fixture.quote.intent, {
+      required: false,
+    });
+    const signed = await signDeclaredExecutionIntent(
+      selectionPayload(fixture.paymentRequirements),
+      declaredPaymentRequired(fixture, declaration, plainRequirements),
+      { signer: account, domain: DOMAIN, approve: () => true },
+    );
+    assert.ok(signed);
+    assert.equal(await recoverExecutionIntentSigner(signed), account.address);
+  });
+
+  await t.test("a required declaration rejects a plain selection", async () => {
+    const declaration = createIntentDeclaration(fixture.quote.intent);
+    assert.equal(declaration.required, true);
+    await assert.rejects(
+      signDeclaredExecutionIntent(
+        selectionPayload(plainRequirements),
+        declaredPaymentRequired(fixture, declaration, plainRequirements),
+        { signer: account, domain: DOMAIN, approve: () => true },
+      ),
+      /missing_intent_requirement/,
+    );
+  });
+});
+
+class CrashingStore implements IntentExecutionStore {
+  crashOnTransitionTo?: IntentExecutionStatus;
+  private readonly shared = new InMemoryIntentExecutionStore();
+
+  registerPaid(
+    record: Parameters<IntentExecutionStore["registerPaid"]>[0],
+  ): Promise<IntentStoreRegistrationResult> {
+    return this.shared.registerPaid(record);
+  }
+
+  get(intentHash: string) {
+    return this.shared.get(intentHash);
+  }
+
+  async transition(
+    transition: IntentExecutionTransition,
+  ): Promise<IntentStoreTransitionResult> {
+    if (transition.to === this.crashOnTransitionTo) {
+      this.crashOnTransitionTo = undefined;
+      throw new Error("simulated crash");
+    }
+    return this.shared.transition(transition);
+  }
+}
+
+test("recover resumes intents abandoned mid-transition by a crash", async t => {
+  function crashFixture(overrides: Partial<IntentExecutorConfig> = {}) {
+    const store = new CrashingStore();
+    const calls = { execution: 0, refund: 0 };
+    const executor = createIntentExecutor(
+      executorConfig(store, {
+        execute: async () => {
+          calls.execution += 1;
+          return {
+            success: true,
+            confirmed: true,
+            transaction: EXECUTION_TX,
+            network: "eip155:998",
+          };
+        },
+        refund: async () => {
+          calls.refund += 1;
+          return {
+            success: true,
+            confirmed: true,
+            transaction: REFUND_TX,
+            network: "hyperliquid:testnet",
+          };
+        },
+        ...overrides,
+      }),
+    );
+    return { store, executor, calls };
+  }
+
+  await t.test("an abandoned execution claim is refunded without execution", async () => {
+    const fixture = await makeFixture();
+    const { store, executor, calls } = crashFixture();
+
+    store.crashOnTransitionTo = "execution_submitted";
+    await assert.rejects(executor.execute(executionInput(fixture)), /simulated crash/);
+    const stuck = await store.get(fixture.signedIntent.intentHash);
+    assert.equal(stuck?.status, "execution_claimed");
+
+    const recovered = await executor.recover(fixture.signedIntent.intentHash);
+    assert.equal(recovered.status, "refunded");
+    assert.equal(recovered.refundTransaction, REFUND_TX);
+    assert.equal(calls.execution, 0);
+    assert.equal(calls.refund, 1);
+  });
+
+  await t.test("an abandoned execution submission parks in manual_intervention", async () => {
+    const fixture = await makeFixture();
+    const { store, executor, calls } = crashFixture();
+
+    store.crashOnTransitionTo = "executed";
+    await assert.rejects(executor.execute(executionInput(fixture)), /simulated crash/);
+    const stuck = await store.get(fixture.signedIntent.intentHash);
+    assert.equal(stuck?.status, "execution_submitted");
+
+    const recovered = await executor.recover(fixture.signedIntent.intentHash);
+    assert.equal(recovered.status, "manual_intervention");
+    assert.equal(recovered.failure?.reason, "execution_uncertain");
+    assert.equal(calls.execution, 1);
+    assert.equal(calls.refund, 0);
+  });
+
+  await t.test("an abandoned execution failure is refunded", async () => {
+    const fixture = await makeFixture();
+    const { store, executor, calls } = crashFixture({
+      execute: async () => ({ success: false, refundSafe: true }),
+    });
+
+    store.crashOnTransitionTo = "refund_pending";
+    await assert.rejects(executor.execute(executionInput(fixture)), /simulated crash/);
+    const stuck = await store.get(fixture.signedIntent.intentHash);
+    assert.equal(stuck?.status, "execution_failed");
+
+    const recovered = await executor.recover(fixture.signedIntent.intentHash);
+    assert.equal(recovered.status, "refunded");
+    assert.equal(calls.refund, 1);
+  });
+
+  await t.test("an abandoned refund claim retries the refund", async () => {
+    const fixture = await makeFixture();
+    const { store, executor, calls } = crashFixture({
+      execute: async () => ({ success: false, refundSafe: true }),
+    });
+
+    store.crashOnTransitionTo = "refund_submitted";
+    await assert.rejects(executor.execute(executionInput(fixture)), /simulated crash/);
+    const stuck = await store.get(fixture.signedIntent.intentHash);
+    assert.equal(stuck?.status, "refund_claimed");
+
+    const recovered = await executor.recover(fixture.signedIntent.intentHash);
+    assert.equal(recovered.status, "refunded");
+    assert.equal(recovered.refundAttempts, 2);
+    assert.equal(calls.refund, 1);
+  });
+
+  await t.test("an abandoned refund submission parks in manual_intervention", async () => {
+    const fixture = await makeFixture();
+    const { store, executor, calls } = crashFixture({
+      execute: async () => ({ success: false, refundSafe: true }),
+    });
+
+    store.crashOnTransitionTo = "refunded";
+    await assert.rejects(executor.execute(executionInput(fixture)), /simulated crash/);
+    const stuck = await store.get(fixture.signedIntent.intentHash);
+    assert.equal(stuck?.status, "refund_submitted");
+
+    const recovered = await executor.recover(fixture.signedIntent.intentHash);
+    assert.equal(recovered.status, "manual_intervention");
+    assert.equal(recovered.failure?.reason, "refund_uncertain");
+    assert.equal(calls.refund, 1);
+  });
+
+  await t.test("paid, terminal, and unknown records are untouched", async () => {
+    const fixture = await makeFixture();
+    const { store, executor } = crashFixture();
+
+    store.crashOnTransitionTo = "execution_claimed";
+    await assert.rejects(executor.execute(executionInput(fixture)), /simulated crash/);
+    const paid = await executor.recover(fixture.signedIntent.intentHash);
+    assert.equal(paid.status, "paid");
+
+    const executed = await executor.execute(executionInput(fixture));
+    assert.equal(executed.status, "executed");
+    const terminal = await executor.recover(fixture.signedIntent.intentHash);
+    assert.equal(terminal.status, "executed");
+    assert.equal(terminal.executionTransaction, EXECUTION_TX);
+
+    await assert.rejects(
+      executor.recover(`0x${"55".repeat(32)}`),
+      /invalid_state/,
+    );
+  });
 });
 
 test("a confirmed execution without a transaction string requires manual intervention", async () => {

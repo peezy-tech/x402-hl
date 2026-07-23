@@ -22,6 +22,13 @@ Notable changes to `x402-hl` are recorded here.
   failed, refund, and manual-intervention outcomes.
 - Required policy, simulation, confirmed execution, and confirmed refund
   adapters.
+- Optional intent declarations: `createIntentDeclaration(intent, { required:
+  false })` lets the client extension send a plain payment when the selected
+  requirement carries no intent commitment; required declarations still refuse
+  unbound selections.
+- `recover(intentHash)` on the intent executor resumes records abandoned
+  mid-transition (for example by a process crash): pre-submission states are
+  driven to a refund and post-submission states park in `manual_intervention`.
 - Complete public intents API reference, production gateway guide, network
   evidence matrix, inventory guidance, and expanded release validation.
 

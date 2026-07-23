@@ -619,6 +619,9 @@ async function signDeclaredExecutionIntent(paymentPayload, paymentRequired, conf
   if (!advertised) {
     throw new Error("Selected payment requirements were not advertised by the server");
   }
+  if (!declaration.required && selected.extra?.[X402_HL_INTENTS_EXTRA_KEY] == null) {
+    return void 0;
+  }
   const input = await resolveIntentInput(
     declaration,
     paymentRequired,

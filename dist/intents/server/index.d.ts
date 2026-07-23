@@ -425,6 +425,15 @@ declare function createIntentExecutor(config: IntentExecutorConfig): {
     verify(input: Omit<PaidIntentVerificationInput, "expectedDomain">): Promise<PaidIntentVerificationResult>;
     execute(input: Omit<PaidIntentVerificationInput, "expectedDomain">): Promise<IntentExecutionRecord>;
     retryRefund(intentHash: string): Promise<IntentExecutionRecord>;
+    /**
+     * Resume an intent abandoned mid-transition, for example by a process
+     * crash, using the claim token persisted on the record. Adapters are only
+     * invoked after the matching `*_submitted` transition is durably recorded,
+     * so pre-submission states refund safely while post-submission states park
+     * in `manual_intervention` for reconciliation. Call only when no other
+     * executor process can still be driving the intent.
+     */
+    recover(intentHash: string): Promise<IntentExecutionRecord>;
 };
 
 export { ExecutionIntentDomain, HyperEvmExecutionIntent, HyperEvmExecutionIntentInput, InMemoryIntentExecutionStore, IntentDeclaration, type IntentExecutionContext, IntentExecutionReceipt, type IntentExecutionRecord, IntentExecutionRecordSchema, type IntentExecutionResult, IntentExecutionStatus, type IntentExecutionStore, type IntentExecutionTransition, type IntentExecutionTransitionPatch, type IntentExecutorConfig, IntentFailureReason, IntentPaymentExtra, type IntentPolicyDecision, type IntentQuoteInput, type IntentRefundContext, type IntentRefundResult, type IntentSimulationResult, IntentStoreConflictError, type IntentStoreConflictKey, type IntentStoreRegistrationResult, type IntentStoreTransitionResult, JsonValue, type PaidIntentVerificationInput, type PaidIntentVerificationResult, type ResolvedIntentQuote, type VerifiedPaidExecutionIntent, assertPaidExecutionIntent, createIntentExecutor, createIntentQuote, isLegalIntentExecutionTransition, verifyPaidExecutionIntent };

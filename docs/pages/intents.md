@@ -140,6 +140,14 @@ approval callback. Either way, show the target action, amount, recipient,
 deadline, and refund address to the user before signing. The signer must support
 EIP-712 `signTypedData`, and the intent user must equal the recovered signer.
 
+`createIntentDeclaration` marks a declaration `required` by default, and the
+client extension then refuses any selected payment requirement that is not
+bound to the declared intent. A server that also advertises a plain,
+intent-free payment option must declare the intent with
+`createIntentDeclaration(intent, { required: false })`; the extension signs an
+intent only when the selected requirement carries the `x402HlIntent`
+commitment and otherwise sends a normal payment without one.
+
 ## Verify Only After Settlement
 
 `verifyPaidExecutionIntent` requires a successful settlement with a payer,
@@ -217,8 +225,16 @@ uncertain execution, uncertain refund, or unreconciled store conflict
 ```
 
 `executed`, `refunded`, and `manual_intervention` are terminal. A
-`refund_failed` record can be retried explicitly with `retryRefund`.
-`InMemoryIntentExecutionStore` implements the contract for tests and
+`refund_failed` record can be retried explicitly with `retryRefund`. If a
+process crashes while a record holds a claim, `recover(intentHash)` resumes it
+using the claim token persisted on the record: adapters are only invoked after
+the matching `*_submitted` transition is durably recorded, so a record
+stranded in `execution_claimed`, `execution_failed`, `refund_pending`,
+`refund_claimed`, or `refund_failed` is driven to a refund, while
+`execution_submitted` and `refund_submitted` park in `manual_intervention` for
+reconciliation. Call `recover` only when no other executor process can still
+be driving the intent — for example on restart after a crash, before resuming
+traffic. `InMemoryIntentExecutionStore` implements the contract for tests and
 single-process development only. It is not durable and must not be used as a
 production replay boundary.
 
