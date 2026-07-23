@@ -52,8 +52,8 @@ declare const HyperEvmExecutionIntentSchema: z.ZodObject<{
     target: z.ZodString;
     callData: z.ZodString;
     value: z.ZodString;
-    recipient: z.ZodString;
-    refundAddress: z.ZodString;
+    recipient: z.ZodEffects<z.ZodString, string, string>;
+    refundAddress: z.ZodEffects<z.ZodString, string, string>;
     maxGasCost: z.ZodString;
     maxSlippageBps: z.ZodNumber;
     deadline: z.ZodNumber;
@@ -110,8 +110,8 @@ declare const SignedHyperEvmExecutionIntentSchema: z.ZodObject<{
         target: z.ZodString;
         callData: z.ZodString;
         value: z.ZodString;
-        recipient: z.ZodString;
-        refundAddress: z.ZodString;
+        recipient: z.ZodEffects<z.ZodString, string, string>;
+        refundAddress: z.ZodEffects<z.ZodString, string, string>;
         maxGasCost: z.ZodString;
         maxSlippageBps: z.ZodNumber;
         deadline: z.ZodNumber;
@@ -223,8 +223,8 @@ declare const IntentDeclarationSchema: z.ZodObject<{
         target: z.ZodString;
         callData: z.ZodString;
         value: z.ZodString;
-        recipient: z.ZodString;
-        refundAddress: z.ZodString;
+        recipient: z.ZodEffects<z.ZodString, string, string>;
+        refundAddress: z.ZodEffects<z.ZodString, string, string>;
         maxGasCost: z.ZodString;
         maxSlippageBps: z.ZodNumber;
         deadline: z.ZodNumber;

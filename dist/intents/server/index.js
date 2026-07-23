@@ -45,8 +45,8 @@ var HyperEvmExecutionIntentSchema = z.object({
   target: EvmAddressSchema,
   callData: HexSchema,
   value: DecimalIntegerStringSchema,
-  recipient: EvmAddressSchema,
-  refundAddress: EvmAddressSchema,
+  recipient: NonZeroEvmAddressSchema,
+  refundAddress: NonZeroEvmAddressSchema,
   maxGasCost: DecimalIntegerStringSchema,
   maxSlippageBps: z.number().int().min(0).max(1e4),
   deadline: z.number().int().positive(),
@@ -698,6 +698,14 @@ async function verifyPaidExecutionIntent(input) {
   }
   const signedIntent = parsedSignedIntent.data;
   const intent = signedIntent.intent;
+  try {
+    normalizeExecutionIntent(intent);
+  } catch {
+    return failure(
+      "malformed_extension_payload",
+      "Payment payload contains a non-canonical x402-hl execution intent"
+    );
+  }
   if (signedIntent.paymentRequirementsHash.toLowerCase() !== paymentRequirementsHash.toLowerCase()) {
     return failure(
       "payment_requirements_hash_mismatch",

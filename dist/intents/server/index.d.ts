@@ -115,8 +115,8 @@ declare const IntentExecutionRecordSchema: zod.ZodObject<{
         target: zod.ZodString;
         callData: zod.ZodString;
         value: zod.ZodString;
-        recipient: zod.ZodString;
-        refundAddress: zod.ZodString;
+        recipient: zod.ZodEffects<zod.ZodString, string, string>;
+        refundAddress: zod.ZodEffects<zod.ZodString, string, string>;
         maxGasCost: zod.ZodString;
         maxSlippageBps: zod.ZodNumber;
         deadline: zod.ZodNumber;
