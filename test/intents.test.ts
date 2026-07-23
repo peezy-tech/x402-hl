@@ -589,6 +589,58 @@ test("intent schema rejects zero recipient and refund addresses", async t => {
   });
 });
 
+test("intent numeric fields beyond uint256 fail closed instead of throwing", async t => {
+  const overflowValue = (2n ** 256n).toString();
+  const maxUint256 = (2n ** 256n - 1n).toString();
+  const intent = normalizeExecutionIntent(baseIntent() as never);
+
+  await t.test("schema rejects a value above uint256", () => {
+    const parsed = HyperEvmExecutionIntentSchema.safeParse({
+      ...intent,
+      value: overflowValue,
+    });
+    assert.equal(parsed.success, false);
+  });
+
+  await t.test("schema rejects a maxGasCost above uint256", () => {
+    const parsed = HyperEvmExecutionIntentSchema.safeParse({
+      ...intent,
+      maxGasCost: overflowValue,
+    });
+    assert.equal(parsed.success, false);
+  });
+
+  await t.test("uint256 max still normalizes and hashes", () => {
+    const boundary = normalizeExecutionIntent(
+      baseIntent({ value: maxUint256, maxGasCost: maxUint256 }) as never,
+    );
+    assert.match(
+      hashExecutionIntent(boundary, { paymentRequirementsHash: HASH_A }),
+      /^0x[0-9a-f]{64}$/,
+    );
+  });
+
+  await t.test("verification fails closed on an overflowing value", async () => {
+    const fixture = await makeFixture();
+    const result = await verifyPaidExecutionIntent({
+      ...verificationInput(fixture),
+      paymentPayload: {
+        ...fixture.paymentPayload,
+        extensions: {
+          [X402_HL_INTENTS_EXTENSION]: {
+            ...fixture.signedIntent,
+            intent: {
+              ...fixture.signedIntent.intent,
+              value: overflowValue,
+            },
+          },
+        },
+      },
+    });
+    assertFailure(result, "malformed_extension_payload");
+  });
+});
+
 function exactPolicy(context: IntentExecutionContext): IntentPolicyDecision {
   return {
     allowed: true,

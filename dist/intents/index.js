@@ -18,7 +18,10 @@ var NonZeroEvmAddressSchema = EvmAddressSchema.refine(
   (value) => value.toLowerCase() !== ZERO_ADDRESS,
   "Address must not be the zero address"
 );
-var DecimalIntegerStringSchema = z.string().regex(DecimalIntegerRegex);
+var UINT256_MAX = (1n << 256n) - 1n;
+var DecimalIntegerStringSchema = z.string().max(78).regex(DecimalIntegerRegex).refine((value) => BigInt(value) <= UINT256_MAX, {
+  message: "Value exceeds the uint256 range"
+});
 var IntentApplicationSchema = z.string().trim().min(1).max(256);
 var JsonValueSchema = z.lazy(
   () => z.union([
@@ -625,6 +628,7 @@ export {
   NonZeroEvmAddressSchema,
   SignedHyperEvmExecutionIntentSchema,
   TERMINAL_INTENT_EXECUTION_STATUSES,
+  UINT256_MAX,
   X402_HL_INTENTS_EXTENSION,
   X402_HL_INTENTS_EXTRA_KEY,
   X402_HL_INTENT_DOMAIN_NAME,

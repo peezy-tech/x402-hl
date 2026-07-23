@@ -163,7 +163,18 @@ export async function verifyPaidExecutionIntent(
     );
   }
 
-  const intentTemplateHash = hashExecutionIntentTemplate(intent);
+  // Normalization is expected to reject anything hashing would reject, but
+  // this function's contract is to never throw on untrusted intents, so the
+  // hashing calls stay guarded regardless.
+  let intentTemplateHash: Hex;
+  try {
+    intentTemplateHash = hashExecutionIntentTemplate(intent);
+  } catch {
+    return failure(
+      "malformed_extension_payload",
+      "Execution intent contains fields outside the hashable range",
+    );
+  }
   if (
     intentTemplateHash.toLowerCase() !==
     input.expectedIntentTemplateHash.toLowerCase()
@@ -194,9 +205,17 @@ export async function verifyPaidExecutionIntent(
     );
   }
 
-  const expectedHash = hashExecutionIntent(intent, {
-    paymentRequirementsHash,
-  });
+  let expectedHash: Hex;
+  try {
+    expectedHash = hashExecutionIntent(intent, {
+      paymentRequirementsHash,
+    });
+  } catch {
+    return failure(
+      "malformed_extension_payload",
+      "Execution intent contains fields outside the hashable range",
+    );
+  }
   if (expectedHash.toLowerCase() !== signedIntent.intentHash.toLowerCase()) {
     return failure(
       "intent_hash_mismatch",

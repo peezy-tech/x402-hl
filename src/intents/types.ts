@@ -28,7 +28,20 @@ export const NonZeroEvmAddressSchema = EvmAddressSchema.refine(
   value => value.toLowerCase() !== ZERO_ADDRESS,
   "Address must not be the zero address",
 );
-export const DecimalIntegerStringSchema = z.string().regex(DecimalIntegerRegex);
+/**
+ * Every decimal-integer field is committed as a uint256 in the EIP-712
+ * message, so values beyond uint256 must fail schema validation here rather
+ * than surface later as a viem IntegerOutOfRangeError during hashing. The
+ * length cap bounds the BigInt conversion; 2^256 - 1 has 78 decimal digits.
+ */
+export const UINT256_MAX = (1n << 256n) - 1n;
+export const DecimalIntegerStringSchema = z
+  .string()
+  .max(78)
+  .regex(DecimalIntegerRegex)
+  .refine(value => BigInt(value) <= UINT256_MAX, {
+    message: "Value exceeds the uint256 range",
+  });
 export const IntentApplicationSchema = z.string().trim().min(1).max(256);
 
 export type JsonValue =
