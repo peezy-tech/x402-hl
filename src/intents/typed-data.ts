@@ -1,5 +1,11 @@
 import type { Address, Hex } from "viem";
-import { getAddress, hashTypedData, isHex, keccak256, toBytes } from "viem";
+import {
+  getAddress,
+  hashTypedData,
+  isHex,
+  keccak256,
+  stringToBytes,
+} from "viem";
 import {
   HyperEvmExecutionIntent,
   HyperEvmExecutionIntentInput,
@@ -73,11 +79,17 @@ export function normalizeExecutionIntent(
 
 export function hashIntentMetadata(metadata: unknown): Hex {
   if (metadata == null) return ZERO_BYTES32;
-  return keccak256(toBytes(stableJson(metadata)));
+  return keccak256(stringToBytes(stableJson(metadata)));
 }
 
+/**
+ * Text commitments always hash the UTF-8 bytes of the value. `toBytes` would
+ * hex-decode a `0x`-prefixed value instead, letting two distinct text values
+ * (for example the nonce `"A"` and the nonce `"0x41"`) collide in the signed
+ * typed data.
+ */
 export function hashIntentText(value: string): Hex {
-  return keccak256(toBytes(value));
+  return keccak256(stringToBytes(value));
 }
 
 export function normalizeBytes32(value: string | undefined): Hex {

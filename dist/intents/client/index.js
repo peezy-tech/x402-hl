@@ -195,7 +195,7 @@ function isTerminalIntentExecutionStatus(status) {
 import { getAddress as getAddress3, recoverTypedDataAddress } from "viem";
 
 // src/intents/payment.ts
-import { getAddress as getAddress2, keccak256 as keccak2562, toBytes as toBytes2 } from "viem";
+import { getAddress as getAddress2, keccak256 as keccak2562, toBytes } from "viem";
 
 // src/intents/json.ts
 function isPlainObject(value) {
@@ -245,7 +245,13 @@ function serializeJson(value, ancestors) {
 }
 
 // src/intents/typed-data.ts
-import { getAddress, hashTypedData, isHex, keccak256, toBytes } from "viem";
+import {
+  getAddress,
+  hashTypedData,
+  isHex,
+  keccak256,
+  stringToBytes
+} from "viem";
 var X402_HL_INTENT_PRIMARY_TYPE = "X402HyperEvmIntent";
 var X402_HL_INTENT_TYPES = {
   [X402_HL_INTENT_PRIMARY_TYPE]: [
@@ -293,10 +299,10 @@ function normalizeExecutionIntent(input) {
 }
 function hashIntentMetadata(metadata) {
   if (metadata == null) return ZERO_BYTES32;
-  return keccak256(toBytes(stableJson(metadata)));
+  return keccak256(stringToBytes(stableJson(metadata)));
 }
 function hashIntentText(value) {
-  return keccak256(toBytes(value));
+  return keccak256(stringToBytes(value));
 }
 function normalizeBytes32(value) {
   if (!value) return ZERO_BYTES32;
@@ -358,7 +364,7 @@ function canonicalizePaymentRequirements(requirements) {
   return canonical;
 }
 function hashPaymentRequirements(requirements) {
-  return keccak2562(toBytes2(stableJson(canonicalizePaymentRequirements(requirements))));
+  return keccak2562(toBytes(stableJson(canonicalizePaymentRequirements(requirements))));
 }
 function createIntentPaymentExtra(intent, intentTemplateHash = hashExecutionIntentTemplate(intent)) {
   return IntentPaymentExtraSchema.parse({

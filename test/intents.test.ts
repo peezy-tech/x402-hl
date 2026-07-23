@@ -7,12 +7,13 @@ import type {
   SettleResponse,
 } from "@x402/core/types";
 import type { Hex } from "viem";
-import { keccak256 } from "viem";
+import { keccak256, stringToBytes } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import {
   createIntentDeclaration,
   hashExecutionIntent,
   hashIntentMetadata,
+  hashIntentText,
   type IntentDeclaration,
   type IntentExecutionStatus,
   normalizeExecutionIntent,
@@ -235,6 +236,22 @@ test("normalization, metadata, and typed-data hashes are deterministic", () => {
   );
   assert.throws(() => stableJson({ invalid: undefined }), /undefined/);
   assert.throws(() => stableJson({ invalid: Number.NaN }), /finite/);
+});
+
+test("text commitments hash UTF-8 bytes so 0x-prefixed text cannot collide", () => {
+  assert.equal(hashIntentText("A"), keccak256(stringToBytes("A")));
+  assert.notEqual(hashIntentText("0x41"), hashIntentText("A"));
+
+  const withTextNonce = normalizeExecutionIntent(
+    baseIntent({ nonce: "A" }) as never,
+  );
+  const withHexLikeNonce = normalizeExecutionIntent(
+    baseIntent({ nonce: "0x41" }) as never,
+  );
+  assert.notEqual(
+    hashExecutionIntent(withTextNonce, { paymentRequirementsHash: HASH_A }),
+    hashExecutionIntent(withHexLikeNonce, { paymentRequirementsHash: HASH_A }),
+  );
 });
 
 test("a valid signed intent recovers its signer and verifies", async () => {
@@ -899,6 +916,56 @@ test("an intent that expires during simulation is refunded without execution", a
   assert.equal(receipt.status, "refunded");
   assert.equal(executionCalls, 0);
   assert.equal(refundCalls, 1);
+});
+
+test("a payment settled after the deadline is durably registered and refunded", async () => {
+  const start = 1_800_000_000;
+  let executionCalls = 0;
+  let refundCalls = 0;
+  const fixture = await makeFixture({ deadline: start });
+  const store = new InMemoryIntentExecutionStore();
+  const executor = createIntentExecutor(
+    executorConfig(store, {
+      now: () => start + 10,
+      execute: async () => {
+        executionCalls += 1;
+        return {
+          success: true,
+          confirmed: true,
+          transaction: EXECUTION_TX,
+          network: "eip155:998",
+        };
+      },
+      refund: async () => {
+        refundCalls += 1;
+        return {
+          success: true,
+          confirmed: true,
+          transaction: REFUND_TX,
+          network: "hyperliquid:testnet",
+        };
+      },
+    }),
+  );
+
+  const strict = await executor.verify({
+    ...executionInput(fixture),
+    now: start + 10,
+  });
+  assertFailure(strict, "execution_intent_expired");
+
+  const receipt = await executor.execute({
+    ...executionInput(fixture),
+    now: start + 10,
+  });
+  assert.equal(receipt.status, "refunded");
+  assert.equal(receipt.refundTransaction, REFUND_TX);
+  assert.equal(executionCalls, 0);
+  assert.equal(refundCalls, 1);
+
+  const stored = await store.get(receipt.intentHash);
+  assert.equal(stored?.status, "refunded");
+  assert.equal(stored?.paymentTransaction, PAYMENT_TX);
 });
 
 test("an uncertain destination outcome requires manual intervention without refund", async () => {

@@ -38,6 +38,13 @@ interface PaidIntentVerificationInput {
     expectedIntentTemplateHash: Hex | string;
     requireSamePayer?: boolean;
     now?: number;
+    /**
+     * When false, an expired deadline alone does not fail verification; every
+     * other check still applies. Reserved for the executor, which must durably
+     * register a settled payment before routing an intent that expired during
+     * settlement latency into the refund state machine. Defaults to true.
+     */
+    enforceDeadline?: boolean;
 }
 interface VerifiedPaidExecutionIntent {
     intent: HyperEvmExecutionIntent;
@@ -423,7 +430,15 @@ declare function createIntentExecutor(config: IntentExecutorConfig): {
     store: IntentExecutionStore;
     get(intentHash: string): Promise<IntentExecutionRecord | undefined>;
     verify(input: Omit<PaidIntentVerificationInput, "expectedDomain">): Promise<PaidIntentVerificationResult>;
-    execute(input: Omit<PaidIntentVerificationInput, "expectedDomain">): Promise<IntentExecutionRecord>;
+    /**
+     * Deadline enforcement is deferred to the state machine rather than
+     * pre-registration verification: a payment can settle after the signed
+     * deadline lapses, and throwing at that point would leave the settled
+     * payment with no durable record and no automated refund. Every other
+     * verification failure still throws before registration because a
+     * mismatched or unsigned intent has no trustworthy refund address.
+     */
+    execute(input: Omit<PaidIntentVerificationInput, "expectedDomain" | "enforceDeadline">): Promise<IntentExecutionRecord>;
     retryRefund(intentHash: string): Promise<IntentExecutionRecord>;
     /**
      * Resume an intent abandoned mid-transition, for example by a process

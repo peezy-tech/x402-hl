@@ -178,6 +178,14 @@ requirement, mismatched domain/quote/template, expired intent, invalid
 signature, or a payer/signer mismatch. Keep `requireSamePayer` enabled unless
 the application has an explicit, separately reviewed delegated-payer design.
 
+The executor's `execute` runs this same verification but defers only the
+deadline check to the durable state machine. Settlement takes real time, so an
+intent can expire between signing and settlement confirmation; a payment that
+settles after the signed deadline is still registered as `paid` and then driven
+to an automated refund instead of failing with no durable record. Every other
+verification failure still throws before registration, because a mismatched or
+unsigned intent has no trustworthy refund address.
+
 ## Durable Store And State Machine
 
 Production gateways must implement the asynchronous `IntentExecutionStore`:

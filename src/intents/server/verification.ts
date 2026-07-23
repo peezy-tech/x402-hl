@@ -28,6 +28,13 @@ export interface PaidIntentVerificationInput {
   expectedIntentTemplateHash: Hex | string;
   requireSamePayer?: boolean;
   now?: number;
+  /**
+   * When false, an expired deadline alone does not fail verification; every
+   * other check still applies. Reserved for the executor, which must durably
+   * register a settled payment before routing an intent that expired during
+   * settlement latency into the refund state machine. Defaults to true.
+   */
+  enforceDeadline?: boolean;
 }
 
 export interface VerifiedPaidExecutionIntent {
@@ -167,7 +174,7 @@ export async function verifyPaidExecutionIntent(
   }
 
   const now = input.now ?? Math.floor(Date.now() / 1000);
-  if (intent.deadline < now) {
+  if (input.enforceDeadline !== false && intent.deadline < now) {
     return failure(
       "execution_intent_expired",
       "Execution intent deadline has passed",

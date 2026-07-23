@@ -59,6 +59,17 @@ Notable changes to `x402-hl` are recorded here.
 
 - Payment requirements, quote template, application, gateway, calldata,
   recipient, limits, and signer are checked as one binding before execution.
+- Intent text commitments (`applicationHash`, `nonceHash`, `quoteId`) now hash
+  UTF-8 bytes explicitly (`stringToBytes`) instead of `toBytes`, which
+  hex-decoded `0x`-prefixed text and let two distinct text values (for example
+  the nonce `"A"` and the nonce `"0x41"`) produce identical EIP-712
+  commitments.
+- `executor.execute` defers only the deadline check of paid-intent verification
+  to the durable state machine: a payment that settles after the signed
+  deadline lapses is registered as `paid` and driven to an automated refund,
+  instead of throwing with no durable record of the settled payment. Standalone
+  `verifyPaidExecutionIntent` still rejects expired intents by default; the new
+  `enforceDeadline: false` input opts out.
 - Duplicate quotes, payments, execution transactions, and refunds are explicit
   store conflicts.
 - Uncertain execution or refund outcomes move to `manual_intervention` instead

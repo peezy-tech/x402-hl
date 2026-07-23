@@ -582,6 +582,12 @@ interface ExecutionIntentPaymentBinding {
 }
 declare function normalizeExecutionIntent(input: HyperEvmExecutionIntentInput): HyperEvmExecutionIntent;
 declare function hashIntentMetadata(metadata: unknown): Hex;
+/**
+ * Text commitments always hash the UTF-8 bytes of the value. `toBytes` would
+ * hex-decode a `0x`-prefixed value instead, letting two distinct text values
+ * (for example the nonce `"A"` and the nonce `"0x41"`) collide in the signed
+ * typed data.
+ */
 declare function hashIntentText(value: string): Hex;
 declare function normalizeBytes32(value: string | undefined): Hex;
 /**

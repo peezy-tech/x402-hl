@@ -150,12 +150,24 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
       });
     },
 
+    /**
+     * Deadline enforcement is deferred to the state machine rather than
+     * pre-registration verification: a payment can settle after the signed
+     * deadline lapses, and throwing at that point would leave the settled
+     * payment with no durable record and no automated refund. Every other
+     * verification failure still throws before registration because a
+     * mismatched or unsigned intent has no trustworthy refund address.
+     */
     async execute(
-      input: Omit<PaidIntentVerificationInput, "expectedDomain">,
+      input: Omit<
+        PaidIntentVerificationInput,
+        "expectedDomain" | "enforceDeadline"
+      >,
     ): Promise<IntentExecutionRecord> {
       const verified = await verifyPaidExecutionIntent({
         ...input,
         expectedDomain: config.domain,
+        enforceDeadline: false,
       });
       if (!verified.ok) {
         throw new Error(`${verified.reason}: ${verified.message}`);
@@ -497,7 +509,10 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
 
 function createPaidRecord(
   verified: VerifiedPaidExecutionIntent,
-  input: Omit<PaidIntentVerificationInput, "expectedDomain">,
+  input: Omit<
+    PaidIntentVerificationInput,
+    "expectedDomain" | "enforceDeadline"
+  >,
 ): IntentExecutionRecord {
   const now = new Date().toISOString();
   return {
