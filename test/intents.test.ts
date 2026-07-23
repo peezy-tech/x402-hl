@@ -851,6 +851,50 @@ test("policy and simulation constraints fail before destination execution", asyn
   }
 });
 
+test("an intent that expires during simulation is refunded without execution", async () => {
+  const start = 1_800_000_000;
+  let currentTime = start;
+  let executionCalls = 0;
+  let refundCalls = 0;
+  const fixture = await makeFixture({ deadline: start + 1 });
+  const executor = createIntentExecutor(
+    executorConfig(new InMemoryIntentExecutionStore(), {
+      now: () => currentTime,
+      simulate: context => {
+        currentTime = start + 2;
+        return exactSimulation(context);
+      },
+      execute: async () => {
+        executionCalls += 1;
+        return {
+          success: true,
+          confirmed: true,
+          transaction: EXECUTION_TX,
+          network: "eip155:998",
+        };
+      },
+      refund: async () => {
+        refundCalls += 1;
+        return {
+          success: true,
+          confirmed: true,
+          transaction: REFUND_TX,
+          network: "hyperliquid:testnet",
+        };
+      },
+    }),
+  );
+
+  const receipt = await executor.execute({
+    ...executionInput(fixture),
+    now: start,
+  });
+
+  assert.equal(receipt.status, "refunded");
+  assert.equal(executionCalls, 0);
+  assert.equal(refundCalls, 1);
+});
+
 test("an uncertain destination outcome requires manual intervention without refund", async () => {
   const fixture = await makeFixture();
   let refundCalls = 0;

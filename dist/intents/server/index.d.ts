@@ -412,6 +412,8 @@ interface IntentExecutorConfig {
     refund: (context: IntentRefundContext) => Promise<IntentRefundResult>;
     /** Intended for deterministic tests; production defaults to random UUIDs. */
     createClaimToken?: () => string;
+    /** Intended for deterministic tests; production defaults to wall-clock time. */
+    now?: () => number;
 }
 declare class IntentStoreConflictError extends Error {
     readonly record?: IntentExecutionRecord;

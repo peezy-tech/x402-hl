@@ -219,23 +219,13 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     try {
       // Reconcile before submitting so a process restart does not blindly
       // replay an already-settled signed action.
-      const existingHash = await this.findMatchingTransaction(
+      const existingHash = await this.findConfirmedTransaction(
         infoClient,
         payer,
         exactPayload,
         requirements,
       );
-      if (
-        existingHash &&
-        /^0x[0-9a-fA-F]{64}$/.test(existingHash) &&
-        (await this.confirmTransaction(
-          infoClient,
-          existingHash,
-          payer,
-          exactPayload,
-          requirements,
-        ))
-      ) {
+      if (existingHash) {
         return {
           success: true,
           transaction: existingHash,
@@ -246,23 +236,13 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
       }
 
       await this.submitToExchange(endpoint, exactPayload);
-      const matchedHash = await this.findMatchingTransaction(
+      const matchedHash = await this.findConfirmedTransaction(
         infoClient,
         payer,
         exactPayload,
         requirements,
       );
-      const confirmed =
-        matchedHash &&
-        /^0x[0-9a-fA-F]{64}$/.test(matchedHash) &&
-        (await this.confirmTransaction(
-          infoClient,
-          matchedHash,
-          payer,
-          exactPayload,
-          requirements,
-        ));
-      if (!matchedHash || !confirmed) {
+      if (!matchedHash) {
         return {
           success: false,
           errorReason: "hl_transfer_not_confirmed",
@@ -366,7 +346,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     return false;
   }
 
-  private async findMatchingTransaction(
+  private async findConfirmedTransaction(
     client: InfoClient,
     payer: string,
     payload: ExactHyperliquidPayload,
@@ -388,7 +368,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
           startTime,
           endTime: Date.now() + MATCH_LOOKAHEAD_MS,
         });
-        const match = updates.find(update =>
+        const candidates = updates.filter(update =>
           this.ledgerUpdateMatchesPayment(update, {
             payer,
             destination,
@@ -399,7 +379,20 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
             nonce: this.paymentNonce(payload),
           }),
         );
-        if (match) return match.hash;
+        for (const candidate of candidates) {
+          if (
+            /^0x[0-9a-fA-F]{64}$/.test(candidate.hash) &&
+            (await this.confirmTransaction(
+              client,
+              candidate.hash,
+              payer,
+              payload,
+              requirements,
+            ))
+          ) {
+            return candidate.hash;
+          }
+        }
       } catch {}
 
       if (attempt < MATCH_ATTEMPTS - 1) {
@@ -461,19 +454,26 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
       destination?: string;
       token?: string;
       amount?: string;
-      nonce?: number;
+      nonce?: number | null;
       sourceDex?: string;
       destinationDex?: string;
     };
-    if (delta.type !== "send") return false;
     if (!delta.user || !delta.destination || !delta.token || !delta.amount) return false;
-    if (
-      delta.sourceDex !== "spot" ||
-      delta.destinationDex !== "spot" ||
-      delta.nonce !== expected.nonce
-    ) {
-      return false;
-    }
+    const exactSend =
+      delta.type === "send" &&
+      delta.sourceDex === "spot" &&
+      delta.destinationDex === "spot" &&
+      delta.nonce === expected.nonce;
+    // The current public info schema reports sendAsset ledger entries as
+    // spotTransfer with a null nonce and no dex fields. Treat that row only as
+    // a candidate: findConfirmedTransaction still requires the explorer action
+    // to match the exact signed sendAsset nonce and all transfer fields.
+    const spotTransfer =
+      delta.type === "spotTransfer" &&
+      delta.nonce == null &&
+      delta.sourceDex == null &&
+      delta.destinationDex == null;
+    if (!exactSend && !spotTransfer) return false;
     if (
       expected.nonce != null &&
       (update.time < expected.nonce - MAX_CLOCK_SKEW_MS ||

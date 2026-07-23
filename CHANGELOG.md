@@ -49,6 +49,11 @@ Notable changes to `x402-hl` are recorded here.
   store conflicts.
 - Uncertain execution or refund outcomes move to `manual_intervention` instead
   of being retried or refunded automatically.
+- The executor rechecks the signed deadline after policy and simulation,
+  directly before invoking destination execution.
+- Settlement reconciliation accepts both nonce-bearing `send` and public
+  `spotTransfer` ledger candidates, but still requires the explorer action to
+  match the exact signed `sendAsset` nonce and fields.
 - Production guidance now requires canonical ABI decoding, exact target and
   selector allowlists, current-state simulation, confirmed receipts, durable
   idempotency, pre-funded HyperEVM inventory, and separately reserved refund

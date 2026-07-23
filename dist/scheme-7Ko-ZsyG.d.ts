@@ -14,7 +14,7 @@ declare class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     private parseExchangeResponse;
     private exchangeErrorBody;
     private confirmTransaction;
-    private findMatchingTransaction;
+    private findConfirmedTransaction;
     private settlementKey;
     private getCachedSettlement;
     private cacheSettlement;

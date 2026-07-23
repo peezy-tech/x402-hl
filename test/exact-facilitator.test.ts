@@ -101,3 +101,61 @@ test("facilitator verify rejects a malformed cryptographic signature", async () 
       result.invalidReason === "invalid_exact_hl_payload_signer_mismatch",
   );
 });
+
+test("facilitator recognizes the public spotTransfer ledger candidate shape", () => {
+  const nonce = Date.now();
+  const facilitator = new ExactHyperliquidFacilitator() as unknown as {
+    ledgerUpdateMatchesPayment(
+      update: unknown,
+      expected: {
+        payer: string;
+        destination: string;
+        token: string;
+        amount: string;
+        requirements: PaymentRequirements;
+        decimals?: number;
+        nonce?: number;
+      },
+    ): boolean;
+  };
+  const update = {
+    time: nonce,
+    hash: `0x${"11".repeat(32)}`,
+    delta: {
+      type: "spotTransfer",
+      token: "USDC",
+      amount: "0.01",
+      usdcValue: "0.01",
+      user: account.address,
+      destination: PAY_TO,
+      fee: "0",
+      nativeTokenFee: "0",
+      nonce: null,
+      feeToken: "USDC",
+    },
+  };
+  const expected = {
+    payer: account.address,
+    destination: PAY_TO,
+    token: requirements.asset,
+    amount: "0.01",
+    requirements,
+    decimals: 8,
+    nonce,
+  };
+
+  assert.equal(
+    facilitator.ledgerUpdateMatchesPayment(update, expected),
+    true,
+  );
+  assert.equal(
+    facilitator.ledgerUpdateMatchesPayment(
+      {
+        ...update,
+        delta: { ...update.delta, destination: OTHER_USER },
+      },
+      expected,
+    ),
+    false,
+  );
+});

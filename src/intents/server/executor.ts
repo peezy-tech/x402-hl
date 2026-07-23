@@ -116,6 +116,8 @@ export interface IntentExecutorConfig {
   refund: (context: IntentRefundContext) => Promise<IntentRefundResult>;
   /** Intended for deterministic tests; production defaults to random UUIDs. */
   createClaimToken?: () => string;
+  /** Intended for deterministic tests; production defaults to wall-clock time. */
+  now?: () => number;
 }
 
 export class IntentStoreConflictError extends Error {
@@ -130,6 +132,7 @@ export class IntentStoreConflictError extends Error {
 
 export function createIntentExecutor(config: IntentExecutorConfig) {
   const claimToken = config.createClaimToken ?? randomUUID;
+  const now = config.now ?? (() => Math.floor(Date.now() / 1000));
 
   return {
     store: config.store,
@@ -185,6 +188,17 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
       });
       if (claim.kind !== "updated") return recordFromConflict(claim, record);
       record = claim.record;
+
+      const claimedDeadlineFailure = verifyExecutionDeadline(record, now());
+      if (claimedDeadlineFailure) {
+        return failAndRefund(
+          config,
+          record,
+          executionClaimToken,
+          claimedDeadlineFailure,
+          claimToken,
+        );
+      }
 
       const context = executionContext(record);
       let policy: IntentPolicyDecision;
@@ -250,6 +264,17 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
         );
       }
 
+      const simulatedDeadlineFailure = verifyExecutionDeadline(record, now());
+      if (simulatedDeadlineFailure) {
+        return failAndRefund(
+          config,
+          record,
+          executionClaimToken,
+          simulatedDeadlineFailure,
+          claimToken,
+        );
+      }
+
       const submitted = await config.store.transition({
         intentHash: record.intentHash,
         expectedRevision: record.revision,
@@ -261,6 +286,17 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
         return recordFromConflict(submitted, record);
       }
       record = submitted.record;
+
+      const submittedDeadlineFailure = verifyExecutionDeadline(record, now());
+      if (submittedDeadlineFailure) {
+        return failAndRefund(
+          config,
+          record,
+          executionClaimToken,
+          submittedDeadlineFailure,
+          claimToken,
+        );
+      }
 
       let execution: IntentExecutionResult;
       try {
@@ -484,6 +520,18 @@ function verifySimulation(
     );
   }
   return undefined;
+}
+
+function verifyExecutionDeadline(
+  record: IntentExecutionRecord,
+  now: number,
+): IntentFailure | undefined {
+  if (Number.isInteger(now) && record.intent.deadline >= now) return undefined;
+  return safeFailure(
+    "execution_intent_expired",
+    "Execution intent expired before destination submission",
+    false,
+  );
 }
 
 async function failAndRefund(
