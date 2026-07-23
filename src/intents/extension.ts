@@ -7,14 +7,14 @@ import {
   SignedHyperEvmExecutionIntentSchema,
   X402_HL_INTENTS_EXTENSION,
   X402_HL_INTENT_VERSION,
-  IntentExecutionMode,
 } from "./types";
-import { ExecutionIntentTypedDataOptions, hashExecutionIntent, normalizeExecutionIntent } from "./typed-data";
+import {
+  hashExecutionIntentTemplate,
+  normalizeExecutionIntent,
+} from "./typed-data";
 
-export interface IntentDeclarationOptions extends ExecutionIntentTypedDataOptions {
+export interface IntentDeclarationOptions {
   required?: boolean;
-  mode?: IntentExecutionMode;
-  expiresAt?: number;
 }
 
 export function createIntentDeclaration(
@@ -25,18 +25,29 @@ export function createIntentDeclaration(
   return IntentDeclarationSchema.parse({
     version: X402_HL_INTENT_VERSION,
     required: options.required ?? true,
-    mode: options.mode ?? "brokered",
+    mode: "brokered",
     intent,
-    intentHash: hashExecutionIntent(intent, options),
+    intentTemplateHash: hashExecutionIntentTemplate(intent),
     quoteId: intent.quoteId,
-    expiresAt: options.expiresAt,
   });
 }
 
-export function readIntentDeclaration(paymentRequired: PaymentRequired): IntentDeclaration | undefined {
+export function readIntentDeclaration(
+  paymentRequired: PaymentRequired,
+): IntentDeclaration | undefined {
   const declaration = paymentRequired.extensions?.[X402_HL_INTENTS_EXTENSION];
   if (declaration == null) return undefined;
-  return IntentDeclarationSchema.parse(declaration);
+  const parsed = IntentDeclarationSchema.parse(declaration);
+  const expectedTemplateHash = hashExecutionIntentTemplate(parsed.intent);
+  if (
+    parsed.intentTemplateHash.toLowerCase() !== expectedTemplateHash.toLowerCase()
+  ) {
+    throw new Error("Intent declaration template hash is invalid");
+  }
+  if (parsed.quoteId !== parsed.intent.quoteId) {
+    throw new Error("Intent declaration quote id is invalid");
+  }
+  return parsed;
 }
 
 export function attachSignedExecutionIntent(
@@ -47,7 +58,8 @@ export function attachSignedExecutionIntent(
     ...paymentPayload,
     extensions: {
       ...(paymentPayload.extensions ?? {}),
-      [X402_HL_INTENTS_EXTENSION]: SignedHyperEvmExecutionIntentSchema.parse(signedIntent),
+      [X402_HL_INTENTS_EXTENSION]:
+        SignedHyperEvmExecutionIntentSchema.parse(signedIntent),
     },
   };
 }

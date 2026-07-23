@@ -1,14 +1,17 @@
+import type { PaymentRequirements } from "@x402/core/types";
 import type { Address, Hex } from "viem";
 import { getAddress, recoverTypedDataAddress } from "viem";
 import {
   HyperEvmExecutionIntentInput,
   SignedHyperEvmExecutionIntent,
   SignedHyperEvmExecutionIntentSchema,
+  ZERO_BYTES32,
 } from "./types";
+import { hashPaymentRequirements } from "./payment";
 import {
-  ExecutionIntentTypedDataOptions,
   buildExecutionIntentTypedData,
   hashExecutionIntent,
+  normalizeBytes32,
   normalizeExecutionIntent,
 } from "./typed-data";
 
@@ -18,9 +21,9 @@ export type IntentSigner = {
   signTypedData: (parameters: any) => Promise<Hex | string>;
 };
 
-export interface SignExecutionIntentOptions extends ExecutionIntentTypedDataOptions {}
-
-export interface VerifyExecutionIntentOptions extends ExecutionIntentTypedDataOptions {}
+export type SignExecutionIntentOptions =
+  | { paymentRequirements: PaymentRequirements; paymentRequirementsHash?: never }
+  | { paymentRequirements?: never; paymentRequirementsHash: Hex | string };
 
 export function getIntentSignerAddress(signer: IntentSigner): Address {
   const account = signer.account;
@@ -38,18 +41,27 @@ export function getIntentSignerAddress(signer: IntentSigner): Address {
 export async function signExecutionIntent(
   input: HyperEvmExecutionIntentInput,
   signer: IntentSigner,
-  options: SignExecutionIntentOptions = {},
+  options: SignExecutionIntentOptions,
 ): Promise<SignedHyperEvmExecutionIntent> {
   const signerAddress = getIntentSignerAddress(signer);
-  const intent = normalizeExecutionIntent({
-    ...input,
-    user: input.user ?? signerAddress,
+  const intent = normalizeExecutionIntent(input);
+  if (getAddress(intent.user) !== signerAddress) {
+    throw new Error("Execution intent user must match the EIP-712 signer");
+  }
+
+  const paymentRequirementsHash = resolvePaymentRequirementsHash(options);
+  if (paymentRequirementsHash.toLowerCase() === ZERO_BYTES32) {
+    throw new Error("A signed execution intent requires finalized payment requirements");
+  }
+
+  const typedData = buildExecutionIntentTypedData(intent, {
+    paymentRequirementsHash,
   });
-  const typedData = buildExecutionIntentTypedData(intent, options);
   const signature = await signTypedDataWithSigner(signer, typedData);
   const signed = {
     intent,
-    intentHash: hashExecutionIntent(intent, options),
+    paymentRequirementsHash,
+    intentHash: hashExecutionIntent(intent, { paymentRequirementsHash }),
     signature,
     signer: signerAddress,
   };
@@ -59,11 +71,12 @@ export async function signExecutionIntent(
 
 export async function recoverExecutionIntentSigner(
   signedIntent: SignedHyperEvmExecutionIntent,
-  options: VerifyExecutionIntentOptions = {},
 ): Promise<Address> {
   const parsed = SignedHyperEvmExecutionIntentSchema.parse(signedIntent);
   const recovered = await recoverTypedDataAddress({
-    ...buildExecutionIntentTypedData(parsed.intent, options),
+    ...buildExecutionIntentTypedData(parsed.intent, {
+      paymentRequirementsHash: parsed.paymentRequirementsHash,
+    }),
     signature: parsed.signature as Hex,
   });
 
@@ -72,16 +85,26 @@ export async function recoverExecutionIntentSigner(
 
 export async function verifyExecutionIntentSignature(
   signedIntent: SignedHyperEvmExecutionIntent,
-  options: VerifyExecutionIntentOptions = {},
 ): Promise<{ valid: boolean; signer: Address; intentHash: Hex }> {
   const parsed = SignedHyperEvmExecutionIntentSchema.parse(signedIntent);
-  const expectedHash = hashExecutionIntent(parsed.intent, options);
-  const signer = await recoverExecutionIntentSigner(parsed, options);
+  const expectedHash = hashExecutionIntent(parsed.intent, {
+    paymentRequirementsHash: parsed.paymentRequirementsHash,
+  });
+  const signer = await recoverExecutionIntentSigner(parsed);
   const valid =
     expectedHash.toLowerCase() === parsed.intentHash.toLowerCase() &&
-    signer.toLowerCase() === parsed.intent.user.toLowerCase();
+    signer === getAddress(parsed.intent.user);
 
   return { valid, signer, intentHash: expectedHash };
+}
+
+function resolvePaymentRequirementsHash(
+  options: SignExecutionIntentOptions,
+): Hex {
+  if ("paymentRequirements" in options && options.paymentRequirements) {
+    return hashPaymentRequirements(options.paymentRequirements);
+  }
+  return normalizeBytes32(options.paymentRequirementsHash);
 }
 
 async function signTypedDataWithSigner(

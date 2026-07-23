@@ -7,14 +7,19 @@ import {
 } from "@x402/core/types";
 import type { InfoClient } from "@nktkas/hyperliquid";
 import type { UserNonFundingLedgerUpdatesResponse } from "@nktkas/hyperliquid/api/info";
+import { SendAssetTypes } from "@nktkas/hyperliquid/api/exchange";
+import { recoverUserFromUserSigned } from "@nktkas/hyperliquid/utils";
+import { getAddress } from "viem";
 import { ExactHyperliquidPayload, ExactHyperliquidPayloadSchema } from "../../types";
 import {
+  HyperliquidNetworkConfigs,
   HYPERLIQUID_WILDCARD_CAIP2,
   SupportedHyperliquidNetworks,
   getExchangeBaseUrl,
   createInfoClient,
   fetchTransactionDetails,
   fetchHyperliquidTokenInfo,
+  getHyperliquidChainName,
 } from "../../utils";
 
 const SETTLEMENT_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -22,6 +27,7 @@ const MATCH_LOOKBACK_MS = 5 * 1000;
 const MATCH_LOOKAHEAD_MS = 30 * 1000;
 const MATCH_ATTEMPTS = 5;
 const MATCH_RETRY_DELAY_MS = 500;
+const MAX_CLOCK_SKEW_MS = 30 * 1000;
 
 type HyperliquidExchangeResponse = {
   status: string;
@@ -62,6 +68,9 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     if (payload.accepted?.network !== requirements.network) {
       return { isValid: false, invalidReason: "network_mismatch" };
     }
+    if (!this.paymentRequirementsMatch(payload.accepted, requirements)) {
+      return { isValid: false, invalidReason: "invalid_exact_hl_payload" };
+    }
     if (!SupportedHyperliquidNetworks.includes(requirements.network as any)) {
       return { isValid: false, invalidReason: "invalid_exact_hl_network" };
     }
@@ -71,21 +80,31 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
       return { isValid: false, invalidReason: "invalid_exact_hl_payload" };
     }
     const exactPayload = parsed.data;
-    const action = exactPayload.action as Record<string, unknown>;
-    if (!action || typeof action !== "object") {
-      return { isValid: false, invalidReason: "invalid_exact_hl_payload" };
+    const action = exactPayload.action;
+    const destination = action.destination;
+    const token = action.token;
+    const amount = action.amount;
+
+    const config =
+      HyperliquidNetworkConfigs[
+        requirements.network as keyof typeof HyperliquidNetworkConfigs
+      ];
+    if (
+      !config ||
+      action.signatureChainId.toLowerCase() !==
+        config.signatureChainId.toLowerCase() ||
+      action.hyperliquidChain !== getHyperliquidChainName(requirements.network)
+    ) {
+      return {
+        isValid: false,
+        invalidReason: "invalid_exact_hl_payload_chain_mismatch",
+      };
     }
-
-    if (!this.validateActionShape(action)) {
-      return { isValid: false, invalidReason: "invalid_exact_hl_payload" };
-    }
-
-    const destination = action.destination as string | undefined;
-    const token = action.token as string | undefined;
-    const amount = action.amount as string | undefined;
-
-    if (!destination || !token || !amount) {
-      return { isValid: false, invalidReason: "invalid_exact_hl_payload" };
+    if (action.nonce !== exactPayload.nonce) {
+      return {
+        isValid: false,
+        invalidReason: "invalid_exact_hl_payload_nonce_mismatch",
+      };
     }
 
     if (destination.toLowerCase() !== requirements.payTo.toLowerCase()) {
@@ -101,21 +120,41 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
       return { isValid: false, invalidReason: "invalid_exact_hl_payload_amount_mismatch" };
     }
 
-    const actionTime = typeof action.time === "number" ? action.time : action.nonce;
-    if (!this.validateTtl(actionTime, requirements.maxTimeoutSeconds)) {
+    if (!this.validateTtl(action.nonce, requirements.maxTimeoutSeconds)) {
       return { isValid: false, invalidReason: "payment_expired" };
     }
 
-    return { isValid: true, payer: exactPayload.user };
+    let recoveredPayer: string;
+    try {
+      recoveredPayer = await recoverUserFromUserSigned({
+        action:
+          action as Parameters<typeof recoverUserFromUserSigned>[0]["action"],
+        types: SendAssetTypes,
+        signature:
+          exactPayload.signature as Parameters<
+            typeof recoverUserFromUserSigned
+          >[0]["signature"],
+      });
+    } catch {
+      return {
+        isValid: false,
+        invalidReason: "invalid_exact_hl_payload_signature",
+      };
+    }
+    if (getAddress(recoveredPayer) !== getAddress(exactPayload.user)) {
+      return {
+        isValid: false,
+        invalidReason: "invalid_exact_hl_payload_signer_mismatch",
+      };
+    }
+
+    return { isValid: true, payer: getAddress(recoveredPayer) };
   }
 
   async settle(
     payload: PaymentPayload,
     requirements: PaymentRequirements,
   ): Promise<SettleResponse> {
-    const parsed = ExactHyperliquidPayloadSchema.safeParse(payload.payload);
-    const payer = parsed.success ? parsed.data.user : undefined;
-
     const verification = await this.verify(payload, requirements);
     if (!verification.isValid) {
       return {
@@ -123,16 +162,26 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
         errorReason: verification.invalidReason,
         transaction: "",
         network: requirements.network,
-        payer,
+        payer: verification.payer,
       };
     }
+    const parsed = ExactHyperliquidPayloadSchema.safeParse(payload.payload);
     if (!parsed.success) {
       return {
         success: false,
         errorReason: "invalid_exact_hl_payload",
         transaction: "",
         network: requirements.network,
-        payer,
+        payer: verification.payer,
+      };
+    }
+    const payer = verification.payer;
+    if (!payer) {
+      return {
+        success: false,
+        errorReason: "invalid_exact_hl_payload_signature",
+        transaction: "",
+        network: requirements.network,
       };
     }
 
@@ -144,7 +193,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     const pending = this.pendingSettlements.get(idempotencyKey);
     if (pending) return pending;
 
-    const settlement = this.settleVerified(exactPayload, requirements, exactPayload.user)
+    const settlement = this.settleVerified(exactPayload, requirements, payer)
       .then(response => {
         if (response.success) {
           this.cacheSettlement(idempotencyKey, response);
@@ -168,40 +217,56 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     const infoClient = createInfoClient(requirements.network as any);
 
     try {
-      const exchangeResponse = await this.submitToExchange(endpoint, exactPayload);
-      const exchangeTxHash = this.exchangeTxHash(exchangeResponse);
-
-      const matchedHash = payer
-        ? await this.findMatchingTransaction(infoClient, payer, exactPayload, requirements)
-        : undefined;
-
-      if (matchedHash && /^0x[0-9a-fA-F]{64}$/.test(matchedHash)) {
+      // Reconcile before submitting so a process restart does not blindly
+      // replay an already-settled signed action.
+      const existingHash = await this.findMatchingTransaction(
+        infoClient,
+        payer,
+        exactPayload,
+        requirements,
+      );
+      if (
+        existingHash &&
+        /^0x[0-9a-fA-F]{64}$/.test(existingHash) &&
+        (await this.confirmTransaction(
+          infoClient,
+          existingHash,
+          payer,
+          exactPayload,
+          requirements,
+        ))
+      ) {
         return {
           success: true,
-          transaction: matchedHash,
+          transaction: existingHash,
           network: requirements.network,
           payer,
+          amount: requirements.amount,
         };
       }
 
-      const txHash = exchangeTxHash;
-
-      if (!txHash || !/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
-        return {
-          success: false,
-          errorReason: "hl_tx_not_found",
-          transaction: txHash ?? "",
-          network: requirements.network,
+      await this.submitToExchange(endpoint, exactPayload);
+      const matchedHash = await this.findMatchingTransaction(
+        infoClient,
+        payer,
+        exactPayload,
+        requirements,
+      );
+      const confirmed =
+        matchedHash &&
+        /^0x[0-9a-fA-F]{64}$/.test(matchedHash) &&
+        (await this.confirmTransaction(
+          infoClient,
+          matchedHash,
           payer,
-        };
-      }
-
-      const confirmed = await this.confirmTransaction(infoClient, txHash);
-      if (!confirmed) {
+          exactPayload,
+          requirements,
+        ));
+      if (!matchedHash || !confirmed) {
         return {
           success: false,
-          errorReason: "hl_tx_unconfirmed",
-          transaction: txHash,
+          errorReason: "hl_transfer_not_confirmed",
+          transaction: matchedHash ?? "",
           network: requirements.network,
           payer,
         };
@@ -209,12 +274,12 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
 
       return {
         success: true,
-        transaction: txHash,
+        transaction: matchedHash,
         network: requirements.network,
         payer,
+        amount: requirements.amount,
       };
-    } catch (error) {
-      console.error("Hyperliquid settle error:", error);
+    } catch {
       return {
         success: false,
         errorReason: "hl_exchange_error",
@@ -267,19 +332,34 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     }
   }
 
-  private exchangeTxHash(response: HyperliquidExchangeResponse): string | undefined {
-    if (response.hash) return response.hash;
-    const nested = response.response;
-    if (!nested || typeof nested !== "object") return undefined;
-    const txHash = nested.txHash;
-    return typeof txHash === "string" ? txHash : undefined;
-  }
-
-  private async confirmTransaction(client: InfoClient, hash: string): Promise<boolean> {
+  private async confirmTransaction(
+    client: InfoClient,
+    hash: string,
+    payer: string,
+    payload: ExactHyperliquidPayload,
+    requirements: PaymentRequirements,
+  ): Promise<boolean> {
     for (let i = 0; i < 3; i++) {
       try {
         const tx = await fetchTransactionDetails(client, hash as `0x${string}`);
-        return tx.error == null;
+        if (tx.error != null || tx.user.toLowerCase() !== payer.toLowerCase()) {
+          return false;
+        }
+        const action = tx.action as Record<string, unknown>;
+        const expected = payload.action;
+        const decimals = await this.resolveDecimals(requirements);
+        return (
+          action.type === "sendAsset" &&
+          action.signatureChainId === expected.signatureChainId &&
+          action.hyperliquidChain === expected.hyperliquidChain &&
+          typeof action.destination === "string" &&
+          action.destination.toLowerCase() === expected.destination.toLowerCase() &&
+          typeof action.token === "string" &&
+          this.tokenMatchesRequirements(action.token, expected.token) &&
+          typeof action.amount === "string" &&
+          this.decimalAmountsEqual(action.amount, expected.amount, decimals) &&
+          action.nonce === expected.nonce
+        );
       } catch {}
       await new Promise(r => setTimeout(r, 250));
     }
@@ -382,13 +462,27 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
       token?: string;
       amount?: string;
       nonce?: number;
+      sourceDex?: string;
+      destinationDex?: string;
     };
-    if (delta.type !== "spotTransfer" && delta.type !== "send") return false;
+    if (delta.type !== "send") return false;
     if (!delta.user || !delta.destination || !delta.token || !delta.amount) return false;
+    if (
+      delta.sourceDex !== "spot" ||
+      delta.destinationDex !== "spot" ||
+      delta.nonce !== expected.nonce
+    ) {
+      return false;
+    }
+    if (
+      expected.nonce != null &&
+      (update.time < expected.nonce - MAX_CLOCK_SKEW_MS ||
+        update.time > expected.nonce + expected.requirements.maxTimeoutSeconds * 1000)
+    ) {
+      return false;
+    }
     if (delta.user.toLowerCase() !== expected.payer.toLowerCase()) return false;
     if (delta.destination.toLowerCase() !== expected.destination.toLowerCase()) return false;
-    if (expected.nonce != null && typeof delta.nonce === "number" && delta.nonce !== expected.nonce)
-      return false;
     if (!this.ledgerTokenMatches(delta.token, expected.token, expected.requirements.asset))
       return false;
     return this.decimalAmountsEqual(delta.amount, expected.amount, expected.decimals);
@@ -458,17 +552,31 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     return Boolean(payloadTokenId && requiredTokenId && payloadTokenId === requiredTokenId);
   }
 
+  private paymentRequirementsMatch(
+    accepted: PaymentRequirements,
+    required: PaymentRequirements,
+  ): boolean {
+    return (
+      accepted.scheme === required.scheme &&
+      accepted.network === required.network &&
+      accepted.asset === required.asset &&
+      accepted.amount === required.amount &&
+      accepted.payTo.toLowerCase() === required.payTo.toLowerCase() &&
+      accepted.maxTimeoutSeconds === required.maxTimeoutSeconds
+    );
+  }
+
   private validateAmount(
     payloadAmount: string,
     requiredAmount: string,
     decimals?: number,
   ): boolean {
     if (decimals == null || decimals < 0) {
-      return Number(payloadAmount) >= Number(requiredAmount);
+      return this.normalizeDecimal(payloadAmount) === this.normalizeDecimal(requiredAmount);
     }
     try {
       const payloadAtomic = this.decimalToAtomic(payloadAmount, decimals);
-      return payloadAtomic >= BigInt(requiredAmount);
+      return payloadAtomic === BigInt(requiredAmount);
     } catch {
       return false;
     }
@@ -482,19 +590,14 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
 
   private validateTtl(actionTime: unknown, maxTimeoutSeconds: number): boolean {
     if (typeof actionTime !== "number") return false;
-    return Date.now() <= actionTime + maxTimeoutSeconds * 1000;
-  }
-
-  private validateActionShape(action: Record<string, unknown>): boolean {
-    if (action.type === "spotSend") return true;
-    if (action.type !== "sendAsset") return false;
-    return action.sourceDex === "spot" && action.destinationDex === "spot";
+    const now = Date.now();
+    return (
+      actionTime <= now + MAX_CLOCK_SKEW_MS &&
+      now <= actionTime + maxTimeoutSeconds * 1000
+    );
   }
 
   private paymentNonce(payload: ExactHyperliquidPayload): number | undefined {
-    const action = payload.action as Record<string, unknown>;
-    if (typeof action.nonce === "number") return action.nonce;
-    if (typeof action.time === "number") return action.time;
-    return payload.nonce;
+    return payload.action.nonce;
   }
 }

@@ -13,7 +13,6 @@ declare class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     private submitToExchange;
     private parseExchangeResponse;
     private exchangeErrorBody;
-    private exchangeTxHash;
     private confirmTransaction;
     private findMatchingTransaction;
     private settlementKey;
@@ -27,10 +26,10 @@ declare class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     private resolveDecimals;
     private extractTokenId;
     private tokenMatchesRequirements;
+    private paymentRequirementsMatch;
     private validateAmount;
     private decimalToAtomic;
     private validateTtl;
-    private validateActionShape;
     private paymentNonce;
 }
 

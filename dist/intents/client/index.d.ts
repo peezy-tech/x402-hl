@@ -1,16 +1,24 @@
 import { ClientExtension } from '@x402/core/client';
-import { PaymentRequired } from '@x402/core/types';
-import { SignExecutionIntentOptions, IntentSigner, HyperEvmExecutionIntentInput, IntentDeclaration, SignedHyperEvmExecutionIntent } from '../index.js';
-export { Bytes32Schema, DecimalIntegerStringSchema, EvmAddressSchema, ExecutionIntentTypedDataOptions, HexSchema, HyperEvmExecutionIntent, HyperEvmExecutionIntentSchema, IntentDeclarationOptions, IntentDeclarationSchema, IntentExecutionMode, IntentExecutionModeSchema, IntentExecutionReceipt, IntentExecutionReceiptSchema, IntentExecutionStatus, IntentExecutionStatusSchema, IntentPaymentExtra, IntentPaymentExtraSchema, JsonRecordSchema, SignedHyperEvmExecutionIntentSchema, VerifyExecutionIntentOptions, X402_HL_INTENTS_EXTENSION, X402_HL_INTENTS_EXTRA_KEY, X402_HL_INTENT_DOMAIN_NAME, X402_HL_INTENT_DOMAIN_VERSION, X402_HL_INTENT_PRIMARY_TYPE, X402_HL_INTENT_TYPES, X402_HL_INTENT_VERSION, ZERO_ADDRESS, ZERO_BYTES32, attachSignedExecutionIntent, buildExecutionIntentTypedData, createIntentDeclaration, getIntentSignerAddress, hashExecutionIntent, hashIntentMetadata, hashIntentText, normalizeBytes32, normalizeExecutionIntent, readIntentDeclaration, readSignedExecutionIntent, recoverExecutionIntentSigner, signExecutionIntent, stableJson, verifyExecutionIntentSignature } from '../index.js';
+import { PaymentRequired, PaymentPayload } from '@x402/core/types';
+import { IntentSigner, ExecutionIntentDomain, HyperEvmExecutionIntentInput, IntentDeclaration, HyperEvmExecutionIntent, SignedHyperEvmExecutionIntent } from '../index.js';
+export { Bytes32Schema, CanonicalPaymentRequirements, DecimalIntegerStringSchema, EvmAddressSchema, ExecutionIntentDomainSchema, ExecutionIntentPaymentBinding, HexSchema, HyperEvmExecutionIntentSchema, IntentApplicationSchema, IntentBindingFailure, IntentBindingResult, IntentDeclarationOptions, IntentDeclarationSchema, IntentExecutionMode, IntentExecutionModeSchema, IntentExecutionReceipt, IntentExecutionReceiptSchema, IntentExecutionStatus, IntentExecutionStatusSchema, IntentFailure, IntentFailureReason, IntentFailureReasonSchema, IntentFailureSchema, IntentPaymentExtra, IntentPaymentExtraSchema, JsonRecordSchema, JsonValue, JsonValueSchema, NonZeroEvmAddressSchema, SignExecutionIntentOptions, SignedHyperEvmExecutionIntentSchema, TERMINAL_INTENT_EXECUTION_STATUSES, X402_HL_INTENTS_EXTENSION, X402_HL_INTENTS_EXTRA_KEY, X402_HL_INTENT_DOMAIN_NAME, X402_HL_INTENT_DOMAIN_VERSION, X402_HL_INTENT_PRIMARY_TYPE, X402_HL_INTENT_TYPES, X402_HL_INTENT_VERSION, ZERO_ADDRESS, ZERO_BYTES32, attachSignedExecutionIntent, buildExecutionIntentTypedData, canonicalizePaymentRequirements, createIntentDeclaration, createIntentPaymentExtra, getIntentSignerAddress, hashExecutionIntent, hashExecutionIntentTemplate, hashIntentMetadata, hashIntentText, hashPaymentRequirements, isTerminalIntentExecutionStatus, normalizeBytes32, normalizeExecutionIntent, readIntentDeclaration, readIntentPaymentExtra, readSignedExecutionIntent, recoverExecutionIntentSigner, signExecutionIntent, stableJson, verifyExecutionIntentSignature, verifyIntentPaymentExtra } from '../index.js';
 import 'zod';
 import 'viem';
 
-type IntentResolver = (declaration: IntentDeclaration | undefined, paymentRequired: PaymentRequired) => Promise<HyperEvmExecutionIntentInput> | HyperEvmExecutionIntentInput;
-interface ExecutionIntentClientExtensionConfig extends SignExecutionIntentOptions {
+type IntentResolver = (declaration: IntentDeclaration | undefined, paymentRequired: PaymentRequired, selectedPaymentRequirements: PaymentPayload["accepted"]) => Promise<HyperEvmExecutionIntentInput> | HyperEvmExecutionIntentInput;
+type IntentApproval = (intent: HyperEvmExecutionIntent, declaration: IntentDeclaration, paymentRequired: PaymentRequired, selectedPaymentRequirements: PaymentPayload["accepted"]) => Promise<boolean> | boolean;
+interface ExecutionIntentClientExtensionConfig {
     signer: IntentSigner;
+    /** Locally trusted application and gateway identity. */
+    domain: ExecutionIntentDomain;
+    /**
+     * An exact locally constructed intent or resolver. If omitted, `approve`
+     * must explicitly approve the server declaration.
+     */
     intent?: HyperEvmExecutionIntentInput | IntentResolver;
+    approve?: IntentApproval;
 }
-declare function signDeclaredExecutionIntent(paymentRequired: PaymentRequired, config: ExecutionIntentClientExtensionConfig): Promise<SignedHyperEvmExecutionIntent | undefined>;
+declare function signDeclaredExecutionIntent(paymentPayload: PaymentPayload, paymentRequired: PaymentRequired, config: ExecutionIntentClientExtensionConfig): Promise<SignedHyperEvmExecutionIntent | undefined>;
 declare function createExecutionIntentClientExtension(config: ExecutionIntentClientExtensionConfig): ClientExtension;
 
-export { type ExecutionIntentClientExtensionConfig, HyperEvmExecutionIntentInput, IntentDeclaration, type IntentResolver, IntentSigner, SignExecutionIntentOptions, SignedHyperEvmExecutionIntent, createExecutionIntentClientExtension, signDeclaredExecutionIntent };
+export { type ExecutionIntentClientExtensionConfig, ExecutionIntentDomain, HyperEvmExecutionIntent, HyperEvmExecutionIntentInput, type IntentApproval, IntentDeclaration, type IntentResolver, IntentSigner, SignedHyperEvmExecutionIntent, createExecutionIntentClientExtension, signDeclaredExecutionIntent };

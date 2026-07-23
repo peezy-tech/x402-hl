@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Install pnpm
+        run: npm install -g pnpm@11.1.3
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Unit and adversarial tests
+        run: pnpm test
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Typecheck Express example
+        run: pnpm example:express:typecheck
+
+      - name: Build package
+        run: pnpm build
+
+      - name: Verify committed build artifacts
+        run: |
+          git add --force dist
+          git diff --cached --exit-code
+
+      - name: Check and build docs
+        run: |
+          pnpm docs:check
+          pnpm docs:build
+
+      - name: Run compatibility probes
+        run: pnpm compat:all
+
+      - name: Audit package archive
+        run: pnpm pack:audit

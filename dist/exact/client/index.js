@@ -4,6 +4,35 @@ import { signUserSignedAction } from "@nktkas/hyperliquid/signing";
 import { toHex as toHex2 } from "viem";
 import { arbitrum as arbitrum2 } from "viem/chains";
 
+// src/types.ts
+import { z } from "zod";
+var HyperliquidTokenIdRegex = /^[A-Za-z0-9]+:0x[0-9a-fA-F]{32,40}$/;
+var Bytes32Regex = /^0x[0-9a-fA-F]{64}$/;
+var EvmAddressRegex = /^0x[0-9a-fA-F]{40}$/;
+var HexIntegerRegex = /^0x[0-9a-fA-F]+$/;
+var DecimalAmountRegex = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
+var ExactHyperliquidPayloadSchema = z.object({
+  action: z.object({
+    type: z.literal("sendAsset"),
+    signatureChainId: z.string().regex(HexIntegerRegex),
+    hyperliquidChain: z.enum(["Mainnet", "Testnet"]),
+    destination: z.string().regex(EvmAddressRegex),
+    sourceDex: z.literal("spot"),
+    destinationDex: z.literal("spot"),
+    token: z.string().regex(HyperliquidTokenIdRegex),
+    amount: z.string().regex(DecimalAmountRegex),
+    fromSubAccount: z.literal(""),
+    nonce: z.number().int().nonnegative().safe()
+  }).strict(),
+  signature: z.object({
+    r: z.string().regex(Bytes32Regex),
+    s: z.string().regex(Bytes32Regex),
+    v: z.union([z.literal(27), z.literal(28)])
+  }).strict(),
+  nonce: z.number().int().nonnegative().safe(),
+  user: z.string().regex(EvmAddressRegex)
+}).strict();
+
 // src/utils.ts
 import * as hl from "@nktkas/hyperliquid";
 
@@ -105,12 +134,12 @@ var ExactHyperliquidScheme = class {
       action: request.action,
       types: SendAssetTypes
     });
-    const payload = {
+    const payload = ExactHyperliquidPayloadSchema.parse({
       action: request.action,
       signature,
       nonce,
       user: signerAddress
-    };
+    });
     return { x402Version, payload };
   }
   getSignerAddress() {

@@ -1,6 +1,6 @@
 {
   "name": "x402-hl",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "type": "module",
   "description": "Standalone Hyperliquid primitives and injected-wallet paywall for x402.",
   "license": "MIT",
@@ -33,7 +33,10 @@
     "docs:check": "pnpm --dir docs check:types",
     "docs:dev": "pnpm --dir docs dev",
     "example:express:typecheck": "tsc -p examples/express/tsconfig.json",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.examples.json"
+    "pack:audit": "node scripts/pack-audit.mjs",
+    "test": "tsx --test test/**/*.test.ts",
+    "test:typecheck": "tsc -p tsconfig.tests.json",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.examples.json && tsc -p tsconfig.tests.json"
   },
   "dependencies": {
     "@nktkas/hyperliquid": "^0.25.9",
@@ -117,9 +120,11 @@
     }
   },
   "files": [
+    "CHANGELOG.md",
     "dist",
     "src/paywall/gen"
   ],
+  "packageManager": "pnpm@11.1.3",
   "engines": {
     "node": ">=24"
   }
