@@ -107,7 +107,9 @@ export async function verifyExecutionIntentSignature(
   const signer = await recoverExecutionIntentSigner(parsed);
   const valid =
     expectedHash.toLowerCase() === parsed.intentHash.toLowerCase() &&
-    signer === getAddress(parsed.intent.user);
+    signer === getAddress(parsed.intent.user) &&
+    (parsed.signer == null ||
+      signer.toLowerCase() === parsed.signer.toLowerCase());
 
   return { valid, signer, intentHash: expectedHash };
 }

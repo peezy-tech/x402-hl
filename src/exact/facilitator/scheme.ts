@@ -24,6 +24,7 @@ const SETTLEMENT_CACHE_TTL_MS = 5 * 60 * 1000;
 const MATCH_LOOKAHEAD_MS = 30 * 1000;
 const PRE_SUBMIT_RECONCILIATION_ATTEMPTS = 5;
 const MATCH_RETRY_DELAY_MS = 1000;
+const PRE_SUBMIT_RECONCILIATION_TIMEOUT_MS = 30 * 1000;
 const POST_SUBMIT_CONFIRMATION_TIMEOUT_MS = 30 * 1000;
 const MAX_CLOCK_SKEW_MS = 30 * 1000;
 // The nonce is the client's wall clock, which validateTtl accepts up to
@@ -264,12 +265,15 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
       // An expired payment is reconciliation's last chance to recover a
       // transfer that confirmed before a crash, so it gets the full retry
       // budget instead.
+      const reconciliationDeadline =
+        Date.now() + PRE_SUBMIT_RECONCILIATION_TIMEOUT_MS;
       const existingHash = await this.findConfirmedTransaction(
         infoClient,
         payer,
         exactPayload,
         requirements,
         expiredAtStart ? PRE_SUBMIT_RECONCILIATION_ATTEMPTS : 1,
+        reconciliationDeadline,
       );
       if (existingHash) {
         return {
@@ -471,7 +475,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     payload: ExactHyperliquidPayload,
     requirements: PaymentRequirements,
     attempts?: number,
-    confirmationDeadline?: number,
+    operationDeadline?: number,
   ): Promise<string | undefined> {
     const action = payload.action as Record<string, unknown>;
     const destination = typeof action.destination === "string" ? action.destination : undefined;
@@ -480,9 +484,10 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     if (!destination || !token || !amount) return undefined;
 
     const deadline =
-      attempts === undefined
-        ? confirmationDeadline ?? Date.now() + POST_SUBMIT_CONFIRMATION_TIMEOUT_MS
-        : undefined;
+      operationDeadline ??
+      (attempts === undefined
+        ? Date.now() + POST_SUBMIT_CONFIRMATION_TIMEOUT_MS
+        : undefined);
     let decimals: number | undefined;
     try {
       decimals = deadline == null
@@ -497,9 +502,8 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     let attempt = 0;
 
     while (
-      attempts === undefined
-        ? attempt === 0 || Date.now() < deadline!
-        : attempt < attempts
+      (attempts === undefined || attempt < attempts) &&
+      (deadline == null || Date.now() < deadline)
     ) {
       attempt += 1;
       try {
@@ -541,13 +545,9 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
         }
       } catch {}
 
-      if (attempts !== undefined) {
-        if (attempt >= attempts) break;
-        await new Promise(r => setTimeout(r, MATCH_RETRY_DELAY_MS));
-        continue;
-      }
-
-      const remaining = deadline! - Date.now();
+      if (attempts !== undefined && attempt >= attempts) break;
+      const remaining =
+        deadline == null ? MATCH_RETRY_DELAY_MS : deadline - Date.now();
       if (remaining <= 0) break;
       await new Promise(r =>
         setTimeout(r, Math.min(MATCH_RETRY_DELAY_MS, remaining)),
@@ -563,10 +563,15 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
       typeof action.destination === "string" ? action.destination.toLowerCase() : "";
     const token = typeof action.token === "string" ? action.token.toLowerCase() : "";
     const amount = typeof action.amount === "string" ? action.amount : "";
+    const signatureChainId =
+      typeof action.signatureChainId === "string"
+        ? action.signatureChainId
+        : "";
     return [
       network,
       payload.user.toLowerCase(),
       String(payload.nonce),
+      signatureChainId,
       destination,
       token,
       amount,

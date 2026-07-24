@@ -233,6 +233,37 @@ type FacilitatorInternals = {
   validateTtl(...args: unknown[]): boolean;
 };
 
+test("settlement cache distinguishes signed action chain IDs", async () => {
+  const original = await signedPaymentPayload();
+  const alternate = await resignPaymentPayload(original, action => {
+    action.signatureChainId = "0x1";
+  });
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as FacilitatorInternals;
+  const originalHash = `0x${"66".repeat(32)}`;
+  const alternateHash = `0x${"67".repeat(32)}`;
+  let reconciliationCalls = 0;
+  internals.findConfirmedTransaction = async (...args: unknown[]) => {
+    reconciliationCalls += 1;
+    const payload = args[2] as { action: { signatureChainId: string } };
+    return payload.action.signatureChainId === "0x1"
+      ? alternateHash
+      : originalHash;
+  };
+  internals.submitToExchange = async () => {
+    throw new Error("a reconciled payment must not be submitted");
+  };
+
+  const first = await facilitator.settle(original, requirements);
+  const second = await facilitator.settle(alternate, requirements);
+
+  assert.equal(first.success, true);
+  assert.equal(first.transaction, originalHash);
+  assert.equal(second.success, true);
+  assert.equal(second.transaction, alternateHash);
+  assert.equal(reconciliationCalls, 2);
+});
+
 test("settle retried after the TTL lapsed still recovers an already-settled payment", async t => {
   const payload = await signedPaymentPayload();
   const facilitator = new ExactHyperliquidFacilitator();
@@ -370,6 +401,7 @@ test("submission and confirmation share one absolute timeout budget", async () =
       operation: (signal: AbortSignal) => Promise<T>,
     ): Promise<T>;
   };
+  let reconciliationDeadline: number | undefined;
   let submitDeadline: number | undefined;
   let confirmationDeadline: number | undefined;
   let reconciliationCalls = 0;
@@ -379,6 +411,7 @@ test("submission and confirmation share one absolute timeout budget", async () =
   };
   internals.findConfirmedTransaction = async (...args: unknown[]) => {
     reconciliationCalls += 1;
+    if (reconciliationCalls === 1) reconciliationDeadline = args[5] as number;
     if (reconciliationCalls === 2) confirmationDeadline = args[5] as number;
     return undefined;
   };
@@ -391,6 +424,9 @@ test("submission and confirmation share one absolute timeout budget", async () =
   assert.equal(settled.success, false);
   assert.equal(settled.errorReason, "hl_transfer_not_confirmed");
   assert.equal(reconciliationCalls, 2);
+  assert.ok(reconciliationDeadline != null);
+  assert.ok(reconciliationDeadline >= before + 30_000);
+  assert.ok(reconciliationDeadline <= after + 30_000);
   assert.equal(confirmationDeadline, submitDeadline);
   assert.ok(submitDeadline != null);
   assert.ok(submitDeadline >= before + 30_000);
@@ -440,7 +476,7 @@ test("the timeout budget aborts a stalled exchange response body", async t => {
   assert.ok(Date.now() - started < 1_000);
 });
 
-test("the timeout budget aborts an in-flight ledger lookup", async () => {
+test("the timeout budget aborts an in-flight fixed-attempt ledger lookup", async () => {
   const payload = await signedPaymentPayload();
   const facilitator = new ExactHyperliquidFacilitator();
   const internals = facilitator as unknown as {
@@ -449,7 +485,7 @@ test("the timeout budget aborts an in-flight ledger lookup", async () => {
       payer: string,
       payload: unknown,
       requirements: PaymentRequirements,
-      attempts: undefined,
+      attempts: number,
       deadline: number,
     ): Promise<string | undefined>;
   };
@@ -470,7 +506,7 @@ test("the timeout budget aborts an in-flight ledger lookup", async () => {
     account.address,
     payload.payload,
     requirements,
-    undefined,
+    1,
     started + 50,
   );
   assert.equal(found, undefined);

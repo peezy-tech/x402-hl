@@ -80,10 +80,11 @@ export type IntentStoreTransitionResult =
  *
  * `registerPaid` requires unique indexes on the primary intent hash,
  * (application, gateway, quote id), and every (payment network, payment
- * transaction). A second transaction for the same intent must be inserted as a
- * duplicate-payment refund record by that same atomic operation. `transition`
- * is a compare-and-swap over payment identity, revision, status, and claim
- * token. Implementations must also enforce unique execution and refund
+ * transaction). A second transaction for the same intent, or for alternate
+ * finalized payment requirements on the same quoted execution template, must be
+ * inserted as a duplicate-payment refund record by that same atomic operation.
+ * `transition` is a compare-and-swap over payment identity, revision, status,
+ * and claim token. Implementations must also enforce unique execution and refund
  * transactions across primary and duplicate-payment records. Transaction
  * identifiers must be canonicalized with surrounding whitespace removed and
  * ASCII case folded before indexing or persistence.
@@ -162,38 +163,21 @@ export class InMemoryIntentExecutionStore implements IntentExecutionStore {
         };
       }
 
-      const duplicate = IntentExecutionRecordSchema.parse({
-        ...record,
-        revision: 0,
-        status: "refund_pending",
-        duplicatePayment: true,
-        executionNetwork: undefined,
-        executionTransaction: undefined,
-        refundNetwork: undefined,
-        refundTransaction: undefined,
-        executionAttempts: 0,
-        refundAttempts: 0,
-        claimToken: undefined,
-        failure: {
-          reason: "duplicate_payment",
-          message: "An additional settled payment for this intent must be refunded",
-          retryable: true,
-        },
-        updatedAt: new Date().toISOString(),
-      });
-      this.duplicatePayments.set(paymentKey, cloneRecord(duplicate));
-      this.payments.set(paymentKey, { kind: "duplicate", paymentKey });
-      return { kind: "duplicate_payment", record: cloneRecord(duplicate) };
+      return this.insertDuplicatePayment(record, paymentKey);
     }
 
     const quoteKey = quoteIndex(record);
     const quoteOwner = this.quotes.get(quoteKey);
     if (quoteOwner) {
-      return {
-        kind: "conflict",
-        key: "quote_id",
-        record: cloneRecord(this.records.get(quoteOwner) as IntentExecutionRecord),
-      };
+      const quoteRecord = this.records.get(quoteOwner);
+      if (!quoteRecord || !sameQuotedExecution(quoteRecord, record)) {
+        return {
+          kind: "conflict",
+          key: "quote_id",
+          record: quoteRecord ? cloneRecord(quoteRecord) : undefined,
+        };
+      }
+      return this.insertDuplicatePayment(record, paymentKey);
     }
 
     const stored = cloneRecord(record);
@@ -332,6 +316,35 @@ export class InMemoryIntentExecutionStore implements IntentExecutionStore {
     }
   }
 
+  private insertDuplicatePayment(
+    record: IntentExecutionRecord,
+    paymentKey: string,
+  ): IntentStoreRegistrationResult {
+    const duplicate = IntentExecutionRecordSchema.parse({
+      ...record,
+      revision: 0,
+      status: "refund_pending",
+      duplicatePayment: true,
+      executionNetwork: undefined,
+      executionTransaction: undefined,
+      refundNetwork: undefined,
+      refundTransaction: undefined,
+      executionAttempts: 0,
+      refundAttempts: 0,
+      claimToken: undefined,
+      failure: {
+        reason: "duplicate_payment",
+        message:
+          "An additional settled payment for this quoted execution must be refunded",
+        retryable: true,
+      },
+      updatedAt: new Date().toISOString(),
+    });
+    this.duplicatePayments.set(paymentKey, cloneRecord(duplicate));
+    this.payments.set(paymentKey, { kind: "duplicate", paymentKey });
+    return { kind: "duplicate_payment", record: cloneRecord(duplicate) };
+  }
+
   private transactionConflict(
     ownerKey: string,
     current: IntentExecutionRecord,
@@ -420,6 +433,19 @@ function sameIntentRegistration(
     left.paymentAsset === right.paymentAsset &&
     left.paymentAmount === right.paymentAmount &&
     left.paymentPayTo.toLowerCase() === right.paymentPayTo.toLowerCase()
+  );
+}
+
+function sameQuotedExecution(
+  left: IntentExecutionRecord,
+  right: IntentExecutionRecord,
+): boolean {
+  return (
+    left.intentTemplateHash.toLowerCase() ===
+      right.intentTemplateHash.toLowerCase() &&
+    left.application === right.application &&
+    left.gateway.toLowerCase() === right.gateway.toLowerCase() &&
+    left.quoteId === right.quoteId
   );
 }
 

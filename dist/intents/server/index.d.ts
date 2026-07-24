@@ -147,7 +147,7 @@ declare const IntentExecutionRecordSchema: zod.ZodObject<{
         quoteId: zod.ZodEffects<zod.ZodString, string, string>;
         metadataHash: zod.ZodString;
         metadata: zod.ZodOptional<zod.ZodRecord<zod.ZodString, zod.ZodType<JsonValue, zod.ZodTypeDef, JsonValue>>>;
-    }, "strip", zod.ZodTypeAny, {
+    }, "strict", zod.ZodTypeAny, {
         value: string;
         application: string;
         gateway: string;
@@ -351,10 +351,11 @@ type IntentStoreTransitionResult = {
  *
  * `registerPaid` requires unique indexes on the primary intent hash,
  * (application, gateway, quote id), and every (payment network, payment
- * transaction). A second transaction for the same intent must be inserted as a
- * duplicate-payment refund record by that same atomic operation. `transition`
- * is a compare-and-swap over payment identity, revision, status, and claim
- * token. Implementations must also enforce unique execution and refund
+ * transaction). A second transaction for the same intent, or for alternate
+ * finalized payment requirements on the same quoted execution template, must be
+ * inserted as a duplicate-payment refund record by that same atomic operation.
+ * `transition` is a compare-and-swap over payment identity, revision, status,
+ * and claim token. Implementations must also enforce unique execution and refund
  * transactions across primary and duplicate-payment records. Transaction
  * identifiers must be canonicalized with surrounding whitespace removed and
  * ASCII case folded before indexing or persistence.
@@ -383,6 +384,7 @@ declare class InMemoryIntentExecutionStore implements IntentExecutionStore {
     private transitionLocator;
     private recordForLocator;
     private storeForLocator;
+    private insertDuplicatePayment;
     private transactionConflict;
 }
 declare function isLegalIntentExecutionTransition(from: IntentExecutionStatus, to: IntentExecutionStatus): boolean;

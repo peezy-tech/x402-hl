@@ -82,14 +82,14 @@ var HyperEvmExecutionIntentSchema = z.object({
   quoteId: IntentTextIdentifierSchema,
   metadataHash: Bytes32Schema,
   metadata: JsonRecordSchema.optional()
-});
+}).strict();
 var SignedHyperEvmExecutionIntentSchema = z.object({
   intent: HyperEvmExecutionIntentSchema,
   paymentRequirementsHash: Bytes32Schema,
   intentHash: Bytes32Schema,
   signature: HexSchema,
   signer: EvmAddressSchema.optional()
-});
+}).strict();
 var IntentDeclarationSchema = z.object({
   version: z.literal(X402_HL_INTENT_VERSION),
   required: z.boolean(),
@@ -602,7 +602,7 @@ async function verifyExecutionIntentSignature(signedIntent) {
     paymentRequirementsHash: parsed.paymentRequirementsHash
   });
   const signer = await recoverExecutionIntentSigner(parsed);
-  const valid = expectedHash.toLowerCase() === parsed.intentHash.toLowerCase() && signer === getAddress3(parsed.intent.user);
+  const valid = expectedHash.toLowerCase() === parsed.intentHash.toLowerCase() && signer === getAddress3(parsed.intent.user) && (parsed.signer == null || signer.toLowerCase() === parsed.signer.toLowerCase());
   return { valid, signer, intentHash: expectedHash };
 }
 function resolvePaymentRequirementsHash(options) {

@@ -230,6 +230,7 @@ var SETTLEMENT_CACHE_TTL_MS = 5 * 60 * 1e3;
 var MATCH_LOOKAHEAD_MS = 30 * 1e3;
 var PRE_SUBMIT_RECONCILIATION_ATTEMPTS = 5;
 var MATCH_RETRY_DELAY_MS = 1e3;
+var PRE_SUBMIT_RECONCILIATION_TIMEOUT_MS = 30 * 1e3;
 var POST_SUBMIT_CONFIRMATION_TIMEOUT_MS = 30 * 1e3;
 var MAX_CLOCK_SKEW_MS = 30 * 1e3;
 var MATCH_LOOKBACK_MS = MAX_CLOCK_SKEW_MS;
@@ -396,12 +397,14 @@ var ExactHyperliquidScheme2 = class {
     const endpoint = getExchangeBaseUrl(requirements.network);
     const infoClient = createInfoClient(requirements.network);
     try {
+      const reconciliationDeadline = Date.now() + PRE_SUBMIT_RECONCILIATION_TIMEOUT_MS;
       const existingHash = await this.findConfirmedTransaction(
         infoClient,
         payer,
         exactPayload,
         requirements,
-        expiredAtStart ? PRE_SUBMIT_RECONCILIATION_ATTEMPTS : 1
+        expiredAtStart ? PRE_SUBMIT_RECONCILIATION_ATTEMPTS : 1,
+        reconciliationDeadline
       );
       if (existingHash) {
         return {
@@ -554,13 +557,13 @@ var ExactHyperliquidScheme2 = class {
     }
     return false;
   }
-  async findConfirmedTransaction(client, payer, payload, requirements, attempts, confirmationDeadline) {
+  async findConfirmedTransaction(client, payer, payload, requirements, attempts, operationDeadline) {
     const action = payload.action;
     const destination = typeof action.destination === "string" ? action.destination : void 0;
     const token = typeof action.token === "string" ? action.token : void 0;
     const amount = typeof action.amount === "string" ? action.amount : void 0;
     if (!destination || !token || !amount) return void 0;
-    const deadline = attempts === void 0 ? confirmationDeadline ?? Date.now() + POST_SUBMIT_CONFIRMATION_TIMEOUT_MS : void 0;
+    const deadline = operationDeadline ?? (attempts === void 0 ? Date.now() + POST_SUBMIT_CONFIRMATION_TIMEOUT_MS : void 0);
     let decimals;
     try {
       decimals = deadline == null ? await this.resolveDecimals(requirements) : await this.runBeforeDeadline(
@@ -572,7 +575,7 @@ var ExactHyperliquidScheme2 = class {
     }
     const startTime = Math.max(0, payload.nonce - MATCH_LOOKBACK_MS);
     let attempt = 0;
-    while (attempts === void 0 ? attempt === 0 || Date.now() < deadline : attempt < attempts) {
+    while ((attempts === void 0 || attempt < attempts) && (deadline == null || Date.now() < deadline)) {
       attempt += 1;
       try {
         const updateParameters = {
@@ -609,12 +612,8 @@ var ExactHyperliquidScheme2 = class {
         }
       } catch {
       }
-      if (attempts !== void 0) {
-        if (attempt >= attempts) break;
-        await new Promise((r) => setTimeout(r, MATCH_RETRY_DELAY_MS));
-        continue;
-      }
-      const remaining = deadline - Date.now();
+      if (attempts !== void 0 && attempt >= attempts) break;
+      const remaining = deadline == null ? MATCH_RETRY_DELAY_MS : deadline - Date.now();
       if (remaining <= 0) break;
       await new Promise(
         (r) => setTimeout(r, Math.min(MATCH_RETRY_DELAY_MS, remaining))
@@ -627,10 +626,12 @@ var ExactHyperliquidScheme2 = class {
     const destination = typeof action.destination === "string" ? action.destination.toLowerCase() : "";
     const token = typeof action.token === "string" ? action.token.toLowerCase() : "";
     const amount = typeof action.amount === "string" ? action.amount : "";
+    const signatureChainId = typeof action.signatureChainId === "string" ? action.signatureChainId : "";
     return [
       network,
       payload.user.toLowerCase(),
       String(payload.nonce),
+      signatureChainId,
       destination,
       token,
       amount

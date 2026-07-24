@@ -71,7 +71,7 @@ declare const HyperEvmExecutionIntentSchema: z.ZodObject<{
     quoteId: z.ZodEffects<z.ZodString, string, string>;
     metadataHash: z.ZodString;
     metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodType<JsonValue, z.ZodTypeDef, JsonValue>>>;
-}, "strip", z.ZodTypeAny, {
+}, "strict", z.ZodTypeAny, {
     value: string;
     application: string;
     gateway: string;
@@ -129,7 +129,7 @@ declare const SignedHyperEvmExecutionIntentSchema: z.ZodObject<{
         quoteId: z.ZodEffects<z.ZodString, string, string>;
         metadataHash: z.ZodString;
         metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodType<JsonValue, z.ZodTypeDef, JsonValue>>>;
-    }, "strip", z.ZodTypeAny, {
+    }, "strict", z.ZodTypeAny, {
         value: string;
         application: string;
         gateway: string;
@@ -170,7 +170,7 @@ declare const SignedHyperEvmExecutionIntentSchema: z.ZodObject<{
     intentHash: z.ZodString;
     signature: z.ZodString;
     signer: z.ZodOptional<z.ZodString>;
-}, "strip", z.ZodTypeAny, {
+}, "strict", z.ZodTypeAny, {
     intent: {
         value: string;
         application: string;
@@ -242,7 +242,7 @@ declare const IntentDeclarationSchema: z.ZodObject<{
         quoteId: z.ZodEffects<z.ZodString, string, string>;
         metadataHash: z.ZodString;
         metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodType<JsonValue, z.ZodTypeDef, JsonValue>>>;
-    }, "strip", z.ZodTypeAny, {
+    }, "strict", z.ZodTypeAny, {
         value: string;
         application: string;
         gateway: string;

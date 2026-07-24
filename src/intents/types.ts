@@ -120,25 +120,27 @@ export const ExecutionIntentDomainSchema = z.object({
 });
 export type ExecutionIntentDomain = z.infer<typeof ExecutionIntentDomainSchema>;
 
-export const HyperEvmExecutionIntentSchema = z.object({
-  version: z.literal(X402_HL_INTENT_VERSION),
-  application: IntentApplicationSchema,
-  gateway: NonZeroEvmAddressSchema,
-  user: EvmAddressSchema,
-  chainId: PositiveSafeIntegerSchema,
-  target: EvmAddressSchema,
-  callData: HexSchema,
-  value: DecimalIntegerStringSchema,
-  recipient: NonZeroEvmAddressSchema,
-  refundAddress: NonZeroEvmAddressSchema,
-  maxGasCost: DecimalIntegerStringSchema,
-  maxSlippageBps: z.number().int().min(0).max(10_000),
-  deadline: PositiveSafeIntegerSchema,
-  nonce: IntentTextIdentifierSchema,
-  quoteId: IntentTextIdentifierSchema,
-  metadataHash: Bytes32Schema,
-  metadata: JsonRecordSchema.optional(),
-});
+export const HyperEvmExecutionIntentSchema = z
+  .object({
+    version: z.literal(X402_HL_INTENT_VERSION),
+    application: IntentApplicationSchema,
+    gateway: NonZeroEvmAddressSchema,
+    user: EvmAddressSchema,
+    chainId: PositiveSafeIntegerSchema,
+    target: EvmAddressSchema,
+    callData: HexSchema,
+    value: DecimalIntegerStringSchema,
+    recipient: NonZeroEvmAddressSchema,
+    refundAddress: NonZeroEvmAddressSchema,
+    maxGasCost: DecimalIntegerStringSchema,
+    maxSlippageBps: z.number().int().min(0).max(10_000),
+    deadline: PositiveSafeIntegerSchema,
+    nonce: IntentTextIdentifierSchema,
+    quoteId: IntentTextIdentifierSchema,
+    metadataHash: Bytes32Schema,
+    metadata: JsonRecordSchema.optional(),
+  })
+  .strict();
 
 export type HyperEvmExecutionIntent = z.infer<typeof HyperEvmExecutionIntentSchema>;
 
@@ -169,13 +171,15 @@ export type HyperEvmExecutionIntentInput = Omit<
     >
   >;
 
-export const SignedHyperEvmExecutionIntentSchema = z.object({
-  intent: HyperEvmExecutionIntentSchema,
-  paymentRequirementsHash: Bytes32Schema,
-  intentHash: Bytes32Schema,
-  signature: HexSchema,
-  signer: EvmAddressSchema.optional(),
-});
+export const SignedHyperEvmExecutionIntentSchema = z
+  .object({
+    intent: HyperEvmExecutionIntentSchema,
+    paymentRequirementsHash: Bytes32Schema,
+    intentHash: Bytes32Schema,
+    signature: HexSchema,
+    signer: EvmAddressSchema.optional(),
+  })
+  .strict();
 
 export type SignedHyperEvmExecutionIntent = z.infer<
   typeof SignedHyperEvmExecutionIntentSchema

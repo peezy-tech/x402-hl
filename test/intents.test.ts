@@ -526,6 +526,24 @@ test("a valid signed intent recovers its signer and verifies", async () => {
   assert.equal(verification.intentHash, fixture.signedIntent.intentHash);
 });
 
+test("signature verification rejects a forged declared signer", async () => {
+  const fixture = await makeFixture();
+  const forged = await verifyExecutionIntentSignature({
+    ...fixture.signedIntent,
+    signer: otherAccount.address,
+  });
+  assert.equal(forged.valid, false);
+  assert.equal(forged.signer, account.address);
+
+  const withoutDeclaredSigner = structuredClone(fixture.signedIntent);
+  delete withoutDeclaredSigner.signer;
+  const compatible = await verifyExecutionIntentSignature(
+    withoutDeclaredSigner,
+  );
+  assert.equal(compatible.valid, true);
+  assert.equal(compatible.signer, account.address);
+});
+
 test("verification fails closed for missing and unsuccessful settlement", async t => {
   const fixture = await makeFixture();
 
@@ -907,21 +925,59 @@ test("verification rejects payment requirements and intent hash mismatches", asy
   });
 });
 
-test("malformed intent extension returns a typed failure", async () => {
+test("malformed intent extension returns a typed failure", async t => {
   const fixture = await makeFixture();
-  const result = await verifyPaidExecutionIntent({
-    ...verificationInput(fixture),
-    paymentPayload: {
-      ...fixture.paymentPayload,
-      extensions: {
-        [X402_HL_INTENTS_EXTENSION]: {
-          intentHash: "not-a-hash",
-          signature: "not-a-signature",
+
+  await t.test("missing required fields", async () => {
+    const result = await verifyPaidExecutionIntent({
+      ...verificationInput(fixture),
+      paymentPayload: {
+        ...fixture.paymentPayload,
+        extensions: {
+          [X402_HL_INTENTS_EXTENSION]: {
+            intentHash: "not-a-hash",
+            signature: "not-a-signature",
+          },
         },
       },
-    },
+    });
+    assertFailure(result, "malformed_extension_payload");
   });
-  assertFailure(result, "malformed_extension_payload");
+
+  await t.test("unknown signed-envelope field", async () => {
+    const result = await verifyPaidExecutionIntent({
+      ...verificationInput(fixture),
+      paymentPayload: {
+        ...fixture.paymentPayload,
+        extensions: {
+          [X402_HL_INTENTS_EXTENSION]: {
+            ...fixture.signedIntent,
+            uncommittedPolicy: true,
+          },
+        },
+      },
+    });
+    assertFailure(result, "malformed_extension_payload");
+  });
+
+  await t.test("unknown intent field", async () => {
+    const result = await verifyPaidExecutionIntent({
+      ...verificationInput(fixture),
+      paymentPayload: {
+        ...fixture.paymentPayload,
+        extensions: {
+          [X402_HL_INTENTS_EXTENSION]: {
+            ...fixture.signedIntent,
+            intent: {
+              ...fixture.signedIntent.intent,
+              uncommittedPolicy: true,
+            },
+          },
+        },
+      },
+    });
+    assertFailure(result, "malformed_extension_payload");
+  });
 });
 
 test("intent metadata mismatching its metadataHash returns a typed failure", async () => {
@@ -1261,6 +1317,88 @@ test("a second settled payment for the same intent is durably refunded", async (
   );
   assert.equal(trackedDuplicate?.status, "refunded");
   assert.equal(trackedDuplicate?.refundTransaction, SECOND_REFUND_TX);
+});
+
+test("a settled alternate payment option for the same quote is durably refunded", async () => {
+  const fixture = await makeFixture();
+  const alternateRequirements = structuredClone(fixture.paymentRequirements);
+  alternateRequirements.amount = "2000000";
+  const alternateSignedIntent = await signExecutionIntent(
+    fixture.quote.intent,
+    account,
+    { paymentRequirements: alternateRequirements },
+  );
+  const createdPayment = await new ExactHyperliquidClient(
+    account,
+  ).createPaymentPayload(2, alternateRequirements);
+  const alternateFixture: Fixture = {
+    ...fixture,
+    signedIntent: alternateSignedIntent,
+    paymentRequirements: alternateRequirements,
+    paymentPayload: {
+      ...createdPayment,
+      accepted: structuredClone(alternateRequirements),
+      extensions: {
+        [X402_HL_INTENTS_EXTENSION]: alternateSignedIntent,
+      },
+    },
+    settleResponse: {
+      ...fixture.settleResponse,
+      amount: alternateRequirements.amount,
+      transaction: SECOND_PAYMENT_TX,
+    },
+  };
+  assert.notEqual(
+    alternateSignedIntent.paymentRequirementsHash,
+    fixture.signedIntent.paymentRequirementsHash,
+  );
+  assert.notEqual(alternateSignedIntent.intentHash, fixture.signedIntent.intentHash);
+
+  const store = new InMemoryIntentExecutionStore();
+  let executionCalls = 0;
+  let refundCalls = 0;
+  const executor = createIntentExecutor(
+    executorConfig(store, {
+      execute: async () => {
+        executionCalls += 1;
+        return {
+          success: true,
+          confirmed: true,
+          transaction: EXECUTION_TX,
+          network: "eip155:998",
+        };
+      },
+      refund: async context => {
+        refundCalls += 1;
+        assert.equal(context.record.intentHash, alternateSignedIntent.intentHash);
+        assert.equal(context.record.paymentAmount, alternateRequirements.amount);
+        assert.equal(context.record.paymentTransaction, SECOND_PAYMENT_TX);
+        return {
+          success: true,
+          confirmed: true,
+          transaction: SECOND_REFUND_TX,
+          network: "hyperliquid:testnet",
+        };
+      },
+    }),
+  );
+
+  const first = await executor.execute(executionInput(fixture));
+  const alternate = await executor.execute(executionInput(alternateFixture));
+  const replay = await executor.execute(executionInput(alternateFixture));
+
+  assert.equal(first.status, "executed");
+  assert.equal(alternate.status, "refunded");
+  assert.equal(alternate.duplicatePayment, true);
+  assert.equal(alternate.paymentTransaction, SECOND_PAYMENT_TX);
+  assert.equal(alternate.refundTransaction, SECOND_REFUND_TX);
+  assert.equal(replay.status, "refunded");
+  assert.equal(executionCalls, 1);
+  assert.equal(refundCalls, 1);
+  assert.equal(
+    (await store.getPayment("hyperliquid:testnet", SECOND_PAYMENT_TX))?.status,
+    "refunded",
+  );
 });
 
 test("a delegated payer's second settled payment is durably refunded", async () => {
