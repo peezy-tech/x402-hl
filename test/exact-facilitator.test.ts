@@ -482,7 +482,7 @@ test("settle keeps an unreconciled submission error as hl_exchange_error", async
   assert.equal(settled.errorReason, "hl_exchange_error");
 });
 
-test("submission and confirmation share one absolute timeout budget", async () => {
+test("post-submit reconciliation gets a fresh timeout after an ambiguous submission", async t => {
   const payload = await signedPaymentPayload();
   const facilitator = new ExactHyperliquidFacilitator();
   const internals = facilitator as unknown as FacilitatorInternals & {
@@ -491,36 +491,39 @@ test("submission and confirmation share one absolute timeout budget", async () =
       operation: (signal: AbortSignal) => Promise<T>,
     ): Promise<T>;
   };
-  let reconciliationDeadline: number | undefined;
-  let submitDeadline: number | undefined;
+  const confirmedHash = `0x${"88".repeat(32)}`;
+  const now = Date.now();
+  t.mock.timers.enable({ apis: ["Date"], now });
+
+  let submissionDeadline: number | undefined;
   let confirmationDeadline: number | undefined;
   let reconciliationCalls = 0;
+  let submissionStarted = false;
   internals.runBeforeDeadline = async (deadline, operation) => {
-    submitDeadline = deadline;
-    return operation(new AbortController().signal);
+    submissionDeadline = deadline;
+    void operation(new AbortController().signal);
+    t.mock.timers.setTime(deadline);
+    throw new Error("exchange response timed out after acceptance");
   };
   internals.findConfirmedTransaction = async (...args: unknown[]) => {
     reconciliationCalls += 1;
-    if (reconciliationCalls === 1) reconciliationDeadline = args[5] as number;
-    if (reconciliationCalls === 2) confirmationDeadline = args[5] as number;
-    return undefined;
+    if (reconciliationCalls === 1) return undefined;
+    confirmationDeadline = args[5] as number;
+    return confirmationDeadline > Date.now() ? confirmedHash : undefined;
   };
-  internals.submitToExchange = async () => ({ status: "ok" });
+  internals.submitToExchange = async () => {
+    submissionStarted = true;
+    return new Promise(() => {});
+  };
 
-  const before = Date.now();
   const settled = await facilitator.settle(payload, requirements);
-  const after = Date.now();
 
-  assert.equal(settled.success, false);
-  assert.equal(settled.errorReason, "hl_transfer_not_confirmed");
+  assert.equal(settled.success, true);
+  assert.equal(settled.transaction, confirmedHash);
+  assert.equal(submissionStarted, true);
   assert.equal(reconciliationCalls, 2);
-  assert.ok(reconciliationDeadline != null);
-  assert.ok(reconciliationDeadline >= before + 30_000);
-  assert.ok(reconciliationDeadline <= after + 30_000);
-  assert.equal(confirmationDeadline, submitDeadline);
-  assert.ok(submitDeadline != null);
-  assert.ok(submitDeadline >= before + 30_000);
-  assert.ok(submitDeadline <= after + 30_000);
+  assert.equal(submissionDeadline, now + 30_000);
+  assert.equal(confirmationDeadline, now + 60_000);
 });
 
 test("the timeout budget aborts a stalled exchange response body", async t => {

@@ -29,6 +29,7 @@ const MATCH_LOOKAHEAD_MS = 30 * 1000;
 const PRE_SUBMIT_RECONCILIATION_ATTEMPTS = 5;
 const MATCH_RETRY_DELAY_MS = 1000;
 const PRE_SUBMIT_RECONCILIATION_TIMEOUT_MS = 30 * 1000;
+const EXCHANGE_SUBMISSION_TIMEOUT_MS = 30 * 1000;
 const POST_SUBMIT_CONFIRMATION_TIMEOUT_MS = 30 * 1000;
 // The nonce is the client's wall clock, which validateTtl accepts up to
 // MAX_CLOCK_SKEW_MS ahead of ours; the exchange ledger timestamp can lag the
@@ -212,11 +213,10 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
         };
       }
 
-      const confirmationDeadline =
-        Date.now() + POST_SUBMIT_CONFIRMATION_TIMEOUT_MS;
+      const submissionDeadline = Date.now() + EXCHANGE_SUBMISSION_TIMEOUT_MS;
       let submissionFailed = false;
       try {
-        await this.runBeforeDeadline(confirmationDeadline, signal =>
+        await this.runBeforeDeadline(submissionDeadline, signal =>
           this.submitToExchange(endpoint, exactPayload, signal),
         );
       } catch {
@@ -225,6 +225,11 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
         submissionFailed = true;
       }
 
+      // Submission can consume its entire timeout after the exchange accepted
+      // the action, so confirmation needs a fresh window to recover a lost or
+      // stalled response instead of inheriting an already-expired deadline.
+      const confirmationDeadline =
+        Date.now() + POST_SUBMIT_CONFIRMATION_TIMEOUT_MS;
       const matchedHash = await this.findConfirmedTransaction(
         infoClient,
         payer,
