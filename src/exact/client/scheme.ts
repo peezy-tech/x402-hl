@@ -4,7 +4,7 @@ import { signUserSignedAction } from "@nktkas/hyperliquid/signing";
 import { toHex } from "viem";
 import { arbitrum } from "viem/chains";
 import { ClientHyperliquidSigner } from "../../signer";
-import { ExactHyperliquidPayload } from "../../types";
+import { ExactHyperliquidPayloadSchema } from "../../types";
 import {
   getHyperliquidChainName,
   fetchHyperliquidTokenInfo,
@@ -50,12 +50,12 @@ export class ExactHyperliquidScheme implements SchemeNetworkClient {
       types: SendAssetTypes,
     });
 
-    const payload: ExactHyperliquidPayload = {
+    const payload = ExactHyperliquidPayloadSchema.parse({
       action: request.action,
       signature,
       nonce,
       user: signerAddress,
-    };
+    });
 
     return { x402Version, payload };
   }

@@ -1,0 +1,124 @@
+import type { PaymentRequirements } from "@x402/core/types";
+import type { Address, Hex } from "viem";
+import { getAddress, recoverTypedDataAddress } from "viem";
+import {
+  HyperEvmExecutionIntentInput,
+  SignedHyperEvmExecutionIntent,
+  SignedHyperEvmExecutionIntentSchema,
+  ZERO_BYTES32,
+} from "./types";
+import { hashPaymentRequirements } from "./payment";
+import {
+  buildExecutionIntentTypedData,
+  hashExecutionIntent,
+  normalizeBytes32,
+  normalizeExecutionIntent,
+} from "./typed-data";
+
+export type IntentSigner = {
+  address?: Address | string;
+  account?: { address?: Address | string } | Address | string;
+  signTypedData: (parameters: any) => Promise<Hex | string>;
+};
+
+export type SignExecutionIntentOptions =
+  | { paymentRequirements: PaymentRequirements; paymentRequirementsHash?: never }
+  | { paymentRequirements?: never; paymentRequirementsHash: Hex | string };
+
+export function getIntentSignerAddress(signer: IntentSigner): Address {
+  const account = signer.account;
+  const address =
+    signer.address ??
+    (typeof account === "string" ? account : account?.address);
+
+  if (!address) {
+    throw new Error("Intent signer is missing an EVM address");
+  }
+
+  return getAddress(address);
+}
+
+export async function signExecutionIntent(
+  input: HyperEvmExecutionIntentInput,
+  signer: IntentSigner,
+  options: SignExecutionIntentOptions,
+): Promise<SignedHyperEvmExecutionIntent> {
+  const signerAddress = getIntentSignerAddress(signer);
+  const intent = normalizeExecutionIntent(input);
+  if (getAddress(intent.user) !== signerAddress) {
+    throw new Error("Execution intent user must match the EIP-712 signer");
+  }
+
+  const paymentRequirementsHash = resolvePaymentRequirementsHash(options);
+  if (paymentRequirementsHash.toLowerCase() === ZERO_BYTES32) {
+    throw new Error("A signed execution intent requires finalized payment requirements");
+  }
+
+  const typedData = buildExecutionIntentTypedData(intent, {
+    paymentRequirementsHash,
+  });
+  const signature = await signTypedDataWithSigner(signer, typedData);
+  const signed = {
+    intent,
+    paymentRequirementsHash,
+    intentHash: hashExecutionIntent(intent, { paymentRequirementsHash }),
+    signature,
+    signer: signerAddress,
+  };
+
+  return SignedHyperEvmExecutionIntentSchema.parse(signed);
+}
+
+export async function recoverExecutionIntentSigner(
+  signedIntent: SignedHyperEvmExecutionIntent,
+): Promise<Address> {
+  const parsed = SignedHyperEvmExecutionIntentSchema.parse(signedIntent);
+  const recovered = await recoverTypedDataAddress({
+    ...buildExecutionIntentTypedData(parsed.intent, {
+      paymentRequirementsHash: parsed.paymentRequirementsHash,
+    }),
+    signature: parsed.signature as Hex,
+  });
+
+  return getAddress(recovered);
+}
+
+export async function verifyExecutionIntentSignature(
+  signedIntent: SignedHyperEvmExecutionIntent,
+): Promise<{ valid: boolean; signer: Address; intentHash: Hex }> {
+  const parsed = SignedHyperEvmExecutionIntentSchema.parse(signedIntent);
+  const expectedHash = hashExecutionIntent(parsed.intent, {
+    paymentRequirementsHash: parsed.paymentRequirementsHash,
+  });
+  const signer = await recoverExecutionIntentSigner(parsed);
+  const valid =
+    expectedHash.toLowerCase() === parsed.intentHash.toLowerCase() &&
+    signer === getAddress(parsed.intent.user);
+
+  return { valid, signer, intentHash: expectedHash };
+}
+
+function resolvePaymentRequirementsHash(
+  options: SignExecutionIntentOptions,
+): Hex {
+  if ("paymentRequirements" in options && options.paymentRequirements) {
+    return hashPaymentRequirements(options.paymentRequirements);
+  }
+  return normalizeBytes32(options.paymentRequirementsHash);
+}
+
+async function signTypedDataWithSigner(
+  signer: IntentSigner,
+  typedData: ReturnType<typeof buildExecutionIntentTypedData>,
+): Promise<Hex> {
+  try {
+    return (await signer.signTypedData(typedData)) as Hex;
+  } catch (error) {
+    const account = signer.account;
+    if (!account) throw error;
+    return (await signer.signTypedData({
+      ...typedData,
+      account,
+    })) as Hex;
+  }
+}

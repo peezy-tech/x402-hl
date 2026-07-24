@@ -1,6 +1,6 @@
 {
   "name": "x402-hl",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "type": "module",
   "description": "Standalone Hyperliquid primitives and injected-wallet paywall for x402.",
   "license": "MIT",
@@ -23,7 +23,8 @@
   "scripts": {
     "build": "pnpm build:paywall && tsup",
     "build:paywall": "tsx src/paywall/build.ts",
-    "compat:all": "pnpm compat:payment-identifier && pnpm compat:offer-receipt && pnpm compat:siwx && pnpm compat:mcp-axios",
+    "compat:all": "pnpm compat:payment-identifier && pnpm compat:offer-receipt && pnpm compat:siwx && pnpm compat:intents && pnpm compat:mcp-axios",
+    "compat:intents": "tsx examples/compat/intents.ts",
     "compat:mcp-axios": "tsx examples/compat/mcp-axios.ts",
     "compat:offer-receipt": "tsx examples/compat/offer-receipt.ts",
     "compat:payment-identifier": "tsx examples/compat/payment-identifier.ts",
@@ -32,7 +33,10 @@
     "docs:check": "pnpm --dir docs check:types",
     "docs:dev": "pnpm --dir docs dev",
     "example:express:typecheck": "tsc -p examples/express/tsconfig.json",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.examples.json"
+    "pack:audit": "node scripts/pack-audit.mjs",
+    "test": "tsx --test test/**/*.test.ts",
+    "test:typecheck": "tsc -p tsconfig.tests.json",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.examples.json && tsc -p tsconfig.tests.json"
   },
   "dependencies": {
     "@nktkas/hyperliquid": "^0.25.9",
@@ -90,6 +94,24 @@
         "default": "./dist/exact/facilitator/index.js"
       }
     },
+    "./intents": {
+      "import": {
+        "types": "./dist/intents/index.d.ts",
+        "default": "./dist/intents/index.js"
+      }
+    },
+    "./intents/client": {
+      "import": {
+        "types": "./dist/intents/client/index.d.ts",
+        "default": "./dist/intents/client/index.js"
+      }
+    },
+    "./intents/server": {
+      "import": {
+        "types": "./dist/intents/server/index.d.ts",
+        "default": "./dist/intents/server/index.js"
+      }
+    },
     "./paywall": {
       "import": {
         "types": "./dist/paywall/index.d.ts",
@@ -98,9 +120,11 @@
     }
   },
   "files": [
+    "CHANGELOG.md",
     "dist",
     "src/paywall/gen"
   ],
+  "packageManager": "pnpm@11.1.3",
   "engines": {
     "node": ">=24"
   }

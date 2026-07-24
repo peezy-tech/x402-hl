@@ -8,14 +8,14 @@ declare class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     getExtra(_: string): Record<string, unknown> | undefined;
     getSigners(_: string): string[];
     verify(payload: PaymentPayload, requirements: PaymentRequirements): Promise<VerifyResponse>;
+    private verifyPayment;
     settle(payload: PaymentPayload, requirements: PaymentRequirements): Promise<SettleResponse>;
     private settleVerified;
     private submitToExchange;
     private parseExchangeResponse;
     private exchangeErrorBody;
-    private exchangeTxHash;
     private confirmTransaction;
-    private findMatchingTransaction;
+    private findConfirmedTransaction;
     private settlementKey;
     private getCachedSettlement;
     private cacheSettlement;
@@ -27,10 +27,10 @@ declare class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     private resolveDecimals;
     private extractTokenId;
     private tokenMatchesRequirements;
+    private paymentRequirementsMatch;
     private validateAmount;
     private decimalToAtomic;
     private validateTtl;
-    private validateActionShape;
     private paymentNonce;
 }
 

@@ -13,12 +13,35 @@ Docs: <https://peezy.tech/x402-hl/>
 - `x402-hl/exact/client`: `ExactHyperliquidScheme` for browser or server clients.
 - `x402-hl/exact/server`: `ExactHyperliquidScheme` for resource servers.
 - `x402-hl/exact/facilitator`: `ExactHyperliquidScheme` for facilitators.
+- `x402-hl/intents`: version-2 intent schemas, canonical payment hashing,
+  EIP-712 signing, and extension helpers.
+- `x402-hl/intents/client`: explicit application/gateway approval and signing
+  bound to the exact finalized payment requirements.
+- `x402-hl/intents/server`: quote, post-settlement verification, durable
+  compare-and-swap storage, constrained execution, status, and refund helpers.
 - `x402-hl/paywall`: `hyperliquidPaywall`, compatible with `@x402/paywall`.
+
+The [execution-intent API reference](./docs/pages/intents.md#api-reference)
+lists every public export and type from the three intents entry points.
 
 ## Environment
 
 The package itself does not read secrets. Applications should provide recipient
 addresses and optional payer credentials through their own environment variables.
+
+Brokered intent gateways additionally need a stable application id and gateway
+address, a destination-chain relayer, a durable store, execution and refund
+inventory, and application-specific policy/simulation adapters.
+
+## Networks And Evidence
+
+| Payment network | Related HyperEVM chain | Code support | Funded evidence |
+| --- | --- | --- | --- |
+| `hyperliquid:testnet` | `eip155:998` | Yes | Successful funded x402 settlements were recorded on 2026-06-09 (`0xbf6176…`) and 2026-06-12 (`0xf53e86…`). |
+| `hyperliquid:mainnet` | `eip155:999` | Yes | No successful funded settlement is recorded; a 2026-06-13 browser attempt failed with `hl_exchange_error`. |
+
+Compatibility probes and mocked settlements do not transfer funds. No funded
+HyperEVM execution-intent smoke is recorded on either network.
 
 ## Compatibility
 
@@ -61,6 +84,7 @@ The compatibility examples are runnable package-level probes:
 pnpm compat:payment-identifier
 pnpm compat:offer-receipt
 pnpm compat:siwx
+pnpm compat:intents
 pnpm compat:mcp-axios
 pnpm compat:all
 ```
@@ -69,25 +93,64 @@ pnpm compat:all
 `HYPERLIQUID_MCP_PAYER_PRIVATE_KEY` or `HYPERLIQUID_PAYER_PRIVATE_KEY` is set.
 The payer account must already hold enough Hyperliquid testnet spot USDC.
 
+## Version-2 Execution Intents
+
+Execution intents implement a non-atomic, brokered saga:
+
+```txt
+quote -> sign finalized payment + intent -> settle HyperCore payment
+      -> verify -> durable claim -> policy/decode -> simulate
+      -> confirmed HyperEVM execution or confirmed refund/manual intervention
+```
+
+Clients and gateways must independently configure the same
+`{ application, gateway }` domain. The signature commits to the canonical hash
+of the selected final `PaymentRequirements`. Servers must also provide the
+locally persisted expected quote id and intent-template hash, and verification
+requires a successful settlement with payer and transaction evidence.
+
+Production use requires an asynchronous durable `IntentExecutionStore` with
+atomic uniqueness and compare-and-swap transitions. The included
+`InMemoryIntentExecutionStore` is for development and tests only.
+
+The operator is trusted to maintain pre-funded HyperEVM execution inventory,
+HyperCore refund liquidity, monitoring, and reconciliation. HyperCore receipts
+do not become HyperEVM inventory automatically; bridge or transfer operations
+are separate treasury rebalancing, not part of the paid request.
+
 The repository also includes a standalone Express app at
 [`examples/express`](./examples/express). It is intended for GitHub readers and
 is not included in the npm package.
 
+[`examples/intents/production.ts`](./examples/intents/production.ts) is the
+typechecked, offline companion to the production intent guide. It demonstrates
+the quote, payment identifier, signed intent, durable-store adapter boundary,
+canonical policy, simulation, confirmed execution/refund, and safe logging
+shape. Its deterministic adapter does not settle funds or submit to HyperEVM.
+
 ## Guides
 
-- [Production sample](./docs/pages/production-sample.md): a deployed reference shape
-  for an app that accepts Hyperliquid x402 payments.
+- [Production sample](./docs/pages/production-sample.md): a durable brokered
+  intent gateway with payment identifiers, canonical ABI policy, simulation,
+  confirmed execution, refunds, and inventory guidance.
 - [Facilitator integration](./docs/pages/facilitator.md): register Hyperliquid
   verification and settlement with upstream `@x402/core`.
 - [Accept Hyperliquid payments](./docs/pages/endpoint.md): configure an x402 endpoint
   that accepts `hyperliquid:testnet`.
+- [Execution intents](./docs/pages/intents.md): bind finalized HyperCore payment
+  requirements to a signed, policy-constrained HyperEVM execution saga.
 
 ## Build
 
 ```sh
 pnpm install
+pnpm test
 pnpm build
 pnpm typecheck
+pnpm example:express:typecheck
+pnpm compat:all
+pnpm docs:check
+pnpm docs:build
 ```
 
 Maintainers should use the repository `RELEASE_CHECKLIST.md` before publishing

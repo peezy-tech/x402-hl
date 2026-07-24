@@ -1,118 +1,552 @@
 ---
-title: Production Sample
-description: Inspect the live Venice gateway that uses published x402-hl with Hyperliquid x402 payments.
+title: Production Brokered Intent Sample
+description: Build a durable, policy-constrained HyperCore-payment to HyperEVM-execution gateway.
 ---
 
-# Production Sample
+# Production Brokered Intent Sample
 
-The current production-style sample is a temporary public Venice API gateway:
+This page is a production reference shape for version-2 brokered execution
+intents. It is intentionally explicit about trust and failure handling. It is
+not a claim that a funded end-to-end intent deployment currently exists.
 
-- App: `https://ai.peezy.tech/`
-- API config: `https://ai.peezy.tech/api`
-- Models: `https://ai.peezy.tech/api/v1/models`
-- Top-up paywall: `https://ai.peezy.tech/api/x402/top-up/pay/5.00`
-- Payment method: `exact` on `hyperliquid:mainnet`
-- Package: published `x402-hl@0.1.2`
+The repository also contains a typechecked, offline companion at
+[`examples/intents/production.ts`](../../examples/intents/production.ts). It
+implements the package-facing quote, payment-identifier, signer, durable-store,
+policy, simulation, confirmed execution, refund, and safe-audit-log boundaries.
+Its chain adapter is deterministic and does not transfer funds.
 
-This deployment is a real-world example of the Hyperliquid integration rather
-than a permanent hosted product. It accepts mainnet Hyperliquid USDC top-ups,
-tracks a prepaid gateway balance, and forwards authenticated chat requests to
-Venice.
+The recorded payment evidence is narrower:
 
-## What It Proves
+- funded `hyperliquid:testnet` x402 settlements succeeded on 2026-06-09 and
+  2026-06-12;
+- a recorded `hyperliquid:mainnet` browser settlement attempt on 2026-06-13
+  failed with `hl_exchange_error`;
+- no funded HyperEVM execution-intent smoke has been recorded on either
+  network.
 
-The sample proves that an x402 resource server can:
+The older temporary Venice gateway was configured for mainnet exact payments
+and prepaid balances. Availability and configuration are not proof of a funded
+mainnet settlement, and that gateway did not prove the version-2 intent saga.
 
-- advertise a Hyperliquid payment requirement;
-- render an injected-wallet browser paywall;
-- have the user's wallet sign a Hyperliquid `sendAsset` action;
-- verify and settle the signed payment with an in-process facilitator;
-- credit an application ledger from explicit USD top-up metadata;
-- serve paid API requests without storing payer private keys on the server.
+## Architecture
 
-The gateway uses upstream `@x402/core`, `@x402/express`, `@x402/paywall`, and
-published `x402-hl`. Browser users sign payments with their injected wallet.
-The remote host only needs the public Hyperliquid receiver address and the
-ordinary application secrets needed to operate the gateway.
-
-## Production Shape
-
-The Venice gateway has a few pieces that most production samples eventually
-need:
-
-- a public base URL and stable x402 resource URLs;
-- a Hyperliquid receiver address configured outside git;
-- an in-process facilitator registered for `hyperliquid:mainnet`;
-- the `x402-hl/paywall` handler registered with upstream `@x402/paywall`;
-- a small ledger that credits allowed top-up amounts and charges usage;
-- spend caps and model allowlists to limit blast radius;
-- operational balance checks for both the application ledger and the
-  Hyperliquid receiver.
-
-The live sample intentionally keeps validation payer keys off the VPS. Funded
-validation can run from an operator machine, but the public service does not
-need a server-side payer key for browser-wallet top-ups.
-
-## Minimal Project Shape
-
-A smaller app can start with:
+The gateway is an application-owned broker:
 
 ```txt
-my-x402-hl-app/
-  package.json
-  src/
-    facilitator.ts
-    server.ts
+durable quote + payment id
+  -> 402 with finalized payment requirements and intent template
+  -> client approves trusted application/gateway and signs payment + intent
+  -> pre-settlement intent verification
+  -> HyperCore settlement
+  -> strict server verification
+  -> durable paid registration
+  -> policy + canonical ABI decode
+  -> simulation
+  -> confirmed HyperEVM execution
+  -> executed
+
+definitive pre-execution failure
+  -> confirmed refund -> refunded
+
+uncertain execution/refund
+  -> manual_intervention
 ```
 
-Install the runtime dependencies:
+Payment and execution are not atomic. The operator is trusted to keep
+destination inventory available, execute the approved action, monitor stalled
+records, and refund eligible failures.
 
-```sh
-pnpm add express @x402/core @x402/express @x402/fetch @x402/paywall viem x402-hl
-pnpm add -D typescript tsx @types/express @types/node
-```
+## Runtime Configuration
 
-Configure runtime values outside git:
+Keep deployment identity, payee, relayer, and treasury values outside git:
 
 ```sh
 HYPERLIQUID_NETWORK=hyperliquid:testnet
 HYPERLIQUID_PAY_TO_ADDRESS=0x...
-HYPERLIQUID_PRICE_USD=0.000001
-PUBLIC_BASE_URL=https://example.com
+INTENT_APPLICATION=com.example.mint/testnet/v1
+INTENT_GATEWAY_ADDRESS=0x...
+HYPEREVM_CHAIN_ID=998
+HYPEREVM_RPC_URL=https://...
+HYPEREVM_RELAYER_PRIVATE_KEY=0x...
+ALLOWED_MINT_CONTRACT=0x...
+DATABASE_URL=postgres://...
 ```
 
-Use `hyperliquid:testnet` while building your first sample. Switch to
-`hyperliquid:mainnet` only after you have controlled receiver credentials,
-funded-wallet validation, and an explicit operating plan for balances and
-spend limits.
+The application and gateway form a deployment identity:
 
-Then combine the [facilitator guide](./facilitator) with the
-[endpoint guide](./endpoint).
+```ts
+import type { ExecutionIntentDomain } from "x402-hl/intents";
 
-## Validate A Sample
-
-Before using funded wallets:
-
-```sh
-pnpm typecheck
+const intentDomain = {
+  application: process.env.INTENT_APPLICATION!,
+  gateway: process.env.INTENT_GATEWAY_ADDRESS as `0x${string}`,
+} satisfies ExecutionIntentDomain;
 ```
 
-Recommended smoke checks:
+Clients must pin the same values in trusted application configuration. They
+must not adopt an application or gateway value merely because a server placed
+it in a `402` response.
 
-- the public page returns `200`;
-- the protected endpoint returns `402` without payment;
-- the HTML paywall contains the Hyperliquid injected-wallet UI;
-- the payment requirement advertises the intended Hyperliquid network;
-- the requirement amount, token, and any application USD metadata agree;
-- the server credits application balances from USD metadata, not raw token base
-  units.
+## 1. Create A Quote And Payment Identifier
 
-For a funded server-side payment test:
+Use separate unique values for the quote and the payment attempt. Persist them
+before advertising the route:
 
-```sh
-HYPERLIQUID_PAYER_PRIVATE_KEY=0x... pnpm pay
+```ts
+import {
+  PAYMENT_IDENTIFIER,
+  declarePaymentIdentifierExtension,
+} from "@x402/extensions/payment-identifier";
+import { encodeFunctionData } from "viem";
+import { createIntentQuote } from "x402-hl/intents/server";
+
+const quoteId = crypto.randomUUID();
+const paymentId = crypto.randomUUID();
+const callData = encodeFunctionData({
+  abi: mintAbi,
+  functionName: "mint",
+  args: [userAddress, tokenId],
+});
+
+const quote = createIntentQuote({
+  id: quoteId,
+  network: "hyperliquid:testnet",
+  price: "$0.05",
+  payTo: process.env.HYPERLIQUID_PAY_TO_ADDRESS!,
+  maxTimeoutSeconds: 300,
+  description: "Allowlisted mint",
+  intent: {
+    application: intentDomain.application,
+    gateway: intentDomain.gateway,
+    user: userAddress,
+    chainId: 998,
+    target: process.env.ALLOWED_MINT_CONTRACT as `0x${string}`,
+    callData,
+    value: "0",
+    recipient: userAddress,
+    refundAddress: userAddress,
+    maxGasCost: "1000000000000000",
+    maxSlippageBps: 0,
+    deadline: Math.floor(Date.now() / 1000) + 300,
+    nonce: crypto.randomUUID(),
+    metadata: { action: "mint", tokenId: tokenId.toString() },
+  },
+});
+
+const routeConfig = {
+  ...quote.routeConfig,
+  extensions: {
+    ...quote.routeConfig.extensions,
+    [PAYMENT_IDENTIFIER]: declarePaymentIdentifierExtension(true),
+  },
+};
+
+await quoteStore.insert({
+  quoteId,
+  paymentId,
+  intentTemplateHash: quote.intentTemplateHash,
+  intent: quote.intent,
+  expiresAt: quote.intent.deadline,
+});
+
+routes[`POST /x402/execute/${quoteId}`] = routeConfig;
 ```
 
-For the preferred browser-wallet validation, open your deployed route, select
-the wallet paywall, connect an injected wallet with Hyperliquid spot USDC on
-the configured network, and sign the transfer.
+Return `quoteId` and `paymentId` to the client over the authenticated quote
+response. Require the payment payload to return that exact payment id.
+
+## 2. Sign The Selected Final Payment Requirements
+
+Register a small upstream payment-identifier extension alongside the intent
+extension:
+
+```ts
+import { x402Client, type ClientExtension } from "@x402/core/client";
+import type { PaymentPayload } from "@x402/core/types";
+import {
+  PAYMENT_IDENTIFIER,
+  appendPaymentIdentifierToExtensions,
+} from "@x402/extensions/payment-identifier";
+import { ExactHyperliquidScheme } from "x402-hl/exact/client";
+import {
+  createExecutionIntentClientExtension,
+} from "x402-hl/intents/client";
+
+function paymentIdentifier(id: string): ClientExtension {
+  return {
+    key: PAYMENT_IDENTIFIER,
+    async enrichPaymentPayload(payload: PaymentPayload) {
+      const extensions = { ...(payload.extensions ?? {}) };
+      appendPaymentIdentifierToExtensions(extensions, id);
+      return { ...payload, extensions };
+    },
+  };
+}
+
+const client = new x402Client()
+  .register("hyperliquid:testnet", new ExactHyperliquidScheme(wallet))
+  .registerExtension(paymentIdentifier(paymentId))
+  .registerExtension(
+    createExecutionIntentClientExtension({
+      signer: wallet,
+      domain: intentDomain,
+      approve(intent) {
+        return (
+          intent.quoteId === quoteId &&
+          intent.chainId === 998 &&
+          intent.target.toLowerCase() ===
+            allowedMintContract.toLowerCase() &&
+          intent.recipient.toLowerCase() ===
+            wallet.address.toLowerCase()
+        );
+      },
+    }),
+  );
+```
+
+The intent extension signs the canonical hash of the exact finalized
+`PaymentRequirements` selected by `@x402/core`, including its complete `extra`
+object. Do not hash a preliminary price configuration or reconstruct
+requirements after settlement.
+
+## 3. Validate Payment Id, Settlement, And Quote
+
+Before requesting settlement, run `verifyPreSettlementExecutionIntent` (or the
+executor's `verifyBeforeSettlement`) with the same payload, requirements, and
+persisted quote values. A payload that fails those settlement-independent
+checks — a missing, malformed, mismatched, or unsigned intent — must be
+rejected without settling, because it can never be registered or automatically
+refunded afterwards.
+
+The framework-specific request adapter should provide the actual payment
+payload, the exact settled requirements, and the facilitator response. Validate
+the upstream payment identifier and compare it to the persisted quote before
+execution:
+
+```ts
+import {
+  extractAndValidatePaymentIdentifier,
+} from "@x402/extensions/payment-identifier";
+import {
+  verifyPaidExecutionIntent,
+} from "x402-hl/intents/server";
+
+const identifier = extractAndValidatePaymentIdentifier(paymentPayload);
+if (!identifier.validation.valid || identifier.id !== persistedQuote.paymentId) {
+  throw new Error("payment_identifier_mismatch");
+}
+
+const verified = await verifyPaidExecutionIntent({
+  paymentPayload,
+  paymentRequirements,
+  settleResponse,
+  expectedDomain: intentDomain,
+  expectedQuoteId: persistedQuote.quoteId,
+  expectedIntentTemplateHash: persistedQuote.intentTemplateHash,
+});
+
+if (!verified.ok) {
+  throw new Error(`${verified.reason}: ${verified.message}`);
+}
+```
+
+This call requires `settleResponse.success === true`, a payer, a settlement
+transaction, a matching network, the locally expected domain/quote/template,
+the exact payment-requirements hash, an unexpired intent, and a valid payer
+signature. Never replace settlement evidence with a successful facilitator
+`verify()` response.
+
+## 4. Implement A Durable Store Adapter
+
+The store is the replay and concurrency boundary. A production table needs at
+least these unique indexes:
+
+```sql
+CREATE UNIQUE INDEX intents_intent_hash_uq
+  ON intent_executions (intent_hash);
+CREATE UNIQUE INDEX intents_quote_uq
+  ON intent_executions (application, gateway, quote_id);
+CREATE UNIQUE INDEX intents_payment_tx_uq
+  ON intent_executions (payment_network, payment_transaction);
+CREATE UNIQUE INDEX intents_execution_tx_uq
+  ON intent_executions (execution_network, execution_transaction)
+  WHERE execution_transaction IS NOT NULL;
+CREATE UNIQUE INDEX intents_refund_tx_uq
+  ON intent_executions (refund_network, refund_transaction)
+  WHERE refund_transaction IS NOT NULL;
+```
+
+Adapt those rows to `IntentExecutionStore`:
+
+```ts
+import type {
+  IntentExecutionRecord,
+  IntentExecutionStore,
+  IntentExecutionTransition,
+} from "x402-hl/intents/server";
+
+class PostgresIntentStore implements IntentExecutionStore {
+  constructor(private readonly db: Database) {}
+
+  async registerPaid(record: IntentExecutionRecord) {
+    return this.db.transaction(async tx => {
+      // INSERT the complete record. On a unique conflict, load the owner and
+      // return { kind: "existing" } only for the same registration; otherwise
+      // return the specific { kind: "conflict", key, record } result.
+      return atomicRegisterPaid(tx, record);
+    });
+  }
+
+  async get(intentHash: string) {
+    return loadIntentRecord(this.db, intentHash);
+  }
+
+  async transition(input: IntentExecutionTransition) {
+    return this.db.transaction(async tx => {
+      // One UPDATE must match intentHash + expectedRevision + from status and,
+      // when present, the claim token. Increment revision in that UPDATE,
+      // validate the legal state transition, and return the updated row.
+      return compareAndSwapIntent(tx, input);
+    });
+  }
+}
+```
+
+`atomicRegisterPaid`, `loadIntentRecord`, and `compareAndSwapIntent` are
+database-specific application code; the example names are not package exports.
+Test the adapter with two processes racing the same quote, payment transaction,
+execution claim, and refund claim. `InMemoryIntentExecutionStore` is only for
+tests and single-process development.
+
+## 5. Canonically Decode And Allowlist The Call
+
+Do not authorize calldata by selector alone. Decode with the exact ABI, validate
+the target and every relevant argument, then re-encode and compare the complete
+bytes:
+
+```ts
+import {
+  decodeFunctionData,
+  encodeFunctionData,
+  getAddress,
+  keccak256,
+  type Hex,
+} from "viem";
+import type {
+  IntentExecutionContext,
+  IntentPolicyDecision,
+} from "x402-hl/intents/server";
+
+function authorizeExactCall(
+  context: IntentExecutionContext,
+): IntentPolicyDecision {
+  const { intent } = context;
+  if (
+    intent.chainId !== 998 ||
+    getAddress(intent.target) !== getAddress(allowedMintContract) ||
+    intent.value !== "0"
+  ) {
+    return { allowed: false };
+  }
+
+  try {
+    const decoded = decodeFunctionData({
+      abi: mintAbi,
+      data: intent.callData as Hex,
+    });
+    if (decoded.functionName !== "mint") return { allowed: false };
+
+    const [recipient, tokenId] = decoded.args;
+    if (getAddress(recipient) !== getAddress(intent.recipient)) {
+      return { allowed: false };
+    }
+    if (!isTokenIdAvailable(tokenId)) return { allowed: false };
+
+    const canonical = encodeFunctionData({
+      abi: mintAbi,
+      functionName: "mint",
+      args: [recipient, tokenId],
+    });
+    if (canonical.toLowerCase() !== intent.callData.toLowerCase()) {
+      return { allowed: false };
+    }
+
+    return {
+      allowed: true,
+      chainId: intent.chainId,
+      target: intent.target,
+      selector: intent.callData.slice(0, 10),
+      callDataHash: keccak256(intent.callData as Hex),
+      value: intent.value,
+      recipient: intent.recipient,
+      metadata: {
+        functionName: "mint",
+        tokenId: tokenId.toString(),
+      },
+    };
+  } catch {
+    return { allowed: false };
+  }
+}
+```
+
+Use a separate allowlist per application version and chain. A signed call is
+authenticated input, not trusted input.
+
+## 6. Simulate, Submit, And Confirm
+
+Simulation must run from the real relayer account against the current chain:
+
+```ts
+import { keccak256, type Hex } from "viem";
+
+async function simulateExactCall(context: IntentExecutionContext) {
+  const request = {
+    account: relayer.address,
+    to: context.intent.target,
+    data: context.intent.callData as Hex,
+    value: BigInt(context.intent.value),
+  } as const;
+
+  try {
+    await publicClient.call(request);
+    const gas = await publicClient.estimateGas(request);
+    const gasPrice = await publicClient.getGasPrice();
+    return {
+      success: true as const,
+      chainId: context.intent.chainId,
+      target: context.intent.target,
+      callDataHash: keccak256(context.intent.callData as Hex),
+      value: context.intent.value,
+      recipient: context.intent.recipient,
+      gasCost: (gas * gasPrice).toString(),
+      slippageBps: 0,
+    };
+  } catch {
+    return { success: false as const };
+  }
+}
+
+async function submitAndConfirmExactCall(context: IntentExecutionContext) {
+  const transaction = await walletClient.sendTransaction({
+    account: relayer,
+    to: context.intent.target,
+    data: context.intent.callData as Hex,
+    value: BigInt(context.intent.value),
+  });
+  const receipt = await publicClient.waitForTransactionReceipt({
+    hash: transaction,
+  });
+
+  if (receipt.status !== "success") {
+    return {
+      success: false as const,
+      refundSafe: true,
+      mayHaveSucceeded: false,
+    };
+  }
+
+  return {
+    success: true as const,
+    confirmed: true as const,
+    transaction,
+    network: `eip155:${context.intent.chainId}`,
+  };
+}
+```
+
+A transport timeout after submission is uncertain. Let the adapter throw or
+return an uncertain result so the record moves to `manual_intervention`; first
+reconcile the destination transaction using the stable intent idempotency key.
+
+## 7. Confirm Refunds
+
+Refunds happen on the payment side and require operator-controlled liquidity.
+Implement the refund adapter with the same care as settlement:
+
+```ts
+import type { IntentRefundContext } from "x402-hl/intents/server";
+
+async function submitAndConfirmRefund(context: IntentRefundContext) {
+  const outcome = await sendConfirmedHyperCoreRefund({
+    network: context.record.paymentNetwork,
+    asset: context.record.paymentAsset,
+    amount: context.record.paymentAmount,
+    destination: context.intent.refundAddress,
+    idempotencyKey: context.idempotencyKey,
+  });
+
+  if (outcome.kind === "confirmed") {
+    return {
+      success: true as const,
+      confirmed: true as const,
+      transaction: outcome.transaction,
+      network: context.record.paymentNetwork,
+    };
+  }
+  if (outcome.kind === "unknown") {
+    return {
+      success: false as const,
+      retryable: false,
+      mayHaveSucceeded: true,
+    };
+  }
+  return {
+    success: false as const,
+    retryable: outcome.retryable,
+    mayHaveSucceeded: false,
+  };
+}
+```
+
+`sendConfirmedHyperCoreRefund` is application code, not an `x402-hl` export.
+It must submit from controlled refund inventory, confirm the exact ledger
+update, and reconcile its idempotency key before retrying. Never auto-refund an
+execution that may already have succeeded.
+
+## 8. Run The Saga And Expose Status
+
+```ts
+import { createIntentExecutor } from "x402-hl/intents/server";
+
+const executor = createIntentExecutor({
+  store: new PostgresIntentStore(db),
+  domain: intentDomain,
+  policy: authorizeExactCall,
+  simulate: simulateExactCall,
+  execute: submitAndConfirmExactCall,
+  refund: submitAndConfirmRefund,
+});
+
+const record = await executor.execute({
+  paymentPayload,
+  paymentRequirements,
+  settleResponse,
+  expectedQuoteId: persistedQuote.quoteId,
+  expectedIntentTemplateHash: persistedQuote.intentTemplateHash,
+});
+```
+
+Expose a status route backed by `executor.get(intentHash)`. Omit internal claim
+tokens. Return the payment, execution, and refund transaction identifiers,
+attempt counts, failure reason, and timestamps. Alert operators on
+`manual_intervention`, long-lived claims/submissions, retryable
+`refund_failed`, inventory pressure, and database conflicts.
+
+## Inventory And Rebalancing
+
+The payee receives spot USDC on HyperCore. The relayer spends gas and possibly
+action inventory on HyperEVM. Those balances are not interchangeable during the
+request:
+
+- reserve HyperEVM gas and action inventory before issuing a quote;
+- reserve HyperCore refund liquidity for outstanding paid intents;
+- decrement available inventory atomically with quote acceptance;
+- treat HyperCore-to-HyperEVM transfers or bridging as asynchronous treasury
+  rebalancing, outside the paid request;
+- stop quoting when available inventory cannot cover execution and refund
+  policy.
+
+An anticipated rebalance is not inventory. A production readiness check should
+reconcile HyperCore receiver balance, HyperEVM relayer gas, action inventory,
+reserved quotes, paid records, and pending refunds independently.

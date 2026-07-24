@@ -26,6 +26,7 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false
 
       - name: Install pnpm
         run: npm install -g pnpm@11.1.3
@@ -42,6 +43,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Unit and adversarial tests
+        run: pnpm test
+
       - name: Build
         run: pnpm build
 
@@ -54,11 +58,20 @@ jobs:
       - name: Run compatibility checks
         run: pnpm compat:all
 
+      - name: Check docs configuration
+        run: pnpm docs:check
+
       - name: Build docs
         run: pnpm docs:build
 
-      - name: Pack audit
-        run: pnpm pack --pack-destination /tmp
+      - name: Pack and audit exact release archive
+        id: pack
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          archive="/tmp/x402-hl-${version}.tgz"
+          pnpm pack --pack-destination /tmp
+          node scripts/pack-audit.mjs "${archive}"
+          echo "archive=${archive}" >> "${GITHUB_OUTPUT}"
 
       - name: Publish to npm
-        run: npm publish --access public --provenance
+        run: npm publish "${{ steps.pack.outputs.archive }}" --access public --provenance
