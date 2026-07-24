@@ -276,6 +276,7 @@ var MATCH_LOOKAHEAD_MS = 30 * 1e3;
 var PRE_SUBMIT_RECONCILIATION_ATTEMPTS = 5;
 var MATCH_RETRY_DELAY_MS = 1e3;
 var PRE_SUBMIT_RECONCILIATION_TIMEOUT_MS = 30 * 1e3;
+var EXCHANGE_SUBMISSION_TIMEOUT_MS = 30 * 1e3;
 var POST_SUBMIT_CONFIRMATION_TIMEOUT_MS = 30 * 1e3;
 var MATCH_LOOKBACK_MS = MAX_CLOCK_SKEW_MS;
 var MATCH_WINDOW_LATE_GRACE_MS = MAX_CLOCK_SKEW_MS + MATCH_LOOKAHEAD_MS;
@@ -391,16 +392,17 @@ var ExactHyperliquidScheme = class {
           payer
         };
       }
-      const confirmationDeadline = Date.now() + POST_SUBMIT_CONFIRMATION_TIMEOUT_MS;
+      const submissionDeadline = Date.now() + EXCHANGE_SUBMISSION_TIMEOUT_MS;
       let submissionFailed = false;
       try {
         await this.runBeforeDeadline(
-          confirmationDeadline,
+          submissionDeadline,
           (signal) => this.submitToExchange(endpoint, exactPayload, signal)
         );
       } catch {
         submissionFailed = true;
       }
+      const confirmationDeadline = Date.now() + POST_SUBMIT_CONFIRMATION_TIMEOUT_MS;
       const matchedHash = await this.findConfirmedTransaction(
         infoClient,
         payer,
