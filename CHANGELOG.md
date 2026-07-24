@@ -70,8 +70,11 @@ Notable changes to `x402-hl` are recorded here.
   instead of throwing with no durable record of the settled payment. Standalone
   `verifyPaidExecutionIntent` still rejects expired intents by default; the new
   `enforceDeadline: false` input opts out.
-- Duplicate quotes, payments, execution transactions, and refunds are explicit
-  store conflicts.
+- A second settled transaction for the same signed intent is now atomically
+  retained as a payment-keyed refund record and refunded without re-executing.
+  Store adapters must add `getPayment` and payment-keyed transitions.
+- Reuse of one payment transaction by different intents, duplicate quotes,
+  execution transactions, and refund transactions remain explicit conflicts.
 - Uncertain execution or refund outcomes move to `manual_intervention` instead
   of being retried or refunded automatically.
 - The executor rechecks the signed deadline after policy and simulation,

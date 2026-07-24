@@ -4,6 +4,8 @@ import type {
   PaymentPayload,
   PaymentRequirements,
 } from "@x402/core/types";
+import { SendAssetTypes } from "@nktkas/hyperliquid/api/exchange";
+import { signUserSignedAction } from "@nktkas/hyperliquid/signing";
 import { privateKeyToAccount } from "viem/accounts";
 import { ExactHyperliquidScheme as ExactHyperliquidClient } from "../src/exact/client/index";
 import { ExactHyperliquidScheme as ExactHyperliquidFacilitator } from "../src/exact/facilitator/index";
@@ -37,6 +39,25 @@ async function signedPaymentPayload(): Promise<PaymentPayload> {
   };
 }
 
+async function resignPaymentPayload(
+  payload: PaymentPayload,
+  mutate: (action: Record<string, unknown>) => void,
+): Promise<PaymentPayload> {
+  const resigned = structuredClone(payload);
+  const exact = resigned.payload as {
+    action: Parameters<typeof signUserSignedAction>[0]["action"] &
+      Record<string, unknown>;
+    signature: unknown;
+  };
+  mutate(exact.action);
+  exact.signature = await signUserSignedAction({
+    wallet: account,
+    action: exact.action,
+    types: SendAssetTypes,
+  });
+  return resigned;
+}
+
 test("facilitator verify recovers the signed Hyperliquid payer without network access", async () => {
   const payload = await signedPaymentPayload();
   const result = await new ExactHyperliquidFacilitator().verify(
@@ -46,6 +67,41 @@ test("facilitator verify recovers the signed Hyperliquid payer without network a
 
   assert.equal(result.isValid, true);
   assert.equal(result.payer, account.address);
+});
+
+test("facilitator accepts a valid non-Arbitrum signature chain ID", async () => {
+  const payload = await resignPaymentPayload(
+    await signedPaymentPayload(),
+    action => {
+      action.signatureChainId = "0x1";
+    },
+  );
+
+  const result = await new ExactHyperliquidFacilitator().verify(
+    payload,
+    requirements,
+  );
+  assert.equal(result.isValid, true);
+  assert.equal(result.payer, account.address);
+});
+
+test("facilitator still rejects the wrong Hyperliquid environment", async () => {
+  const payload = await resignPaymentPayload(
+    await signedPaymentPayload(),
+    action => {
+      action.hyperliquidChain = "Mainnet";
+    },
+  );
+
+  const result = await new ExactHyperliquidFacilitator().verify(
+    payload,
+    requirements,
+  );
+  assert.equal(result.isValid, false);
+  assert.equal(
+    result.invalidReason,
+    "invalid_exact_hl_payload_chain_mismatch",
+  );
 });
 
 test("facilitator verify rejects a spoofed declared payer", async () => {
@@ -151,6 +207,39 @@ test("settle of an expired payment with no ledger match fails closed without sub
   assert.equal(settled.success, false);
   assert.equal(settled.errorReason, "payment_expired");
   assert.equal(submitted, false);
+});
+
+test("settle reconciles after a replay submission error", async () => {
+  const payload = await signedPaymentPayload();
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as FacilitatorInternals;
+  const confirmedHash = `0x${"77".repeat(32)}`;
+  let reconciliationCalls = 0;
+  internals.findConfirmedTransaction = async () =>
+    ++reconciliationCalls === 1 ? undefined : confirmedHash;
+  internals.submitToExchange = async () => {
+    throw new Error("nonce already used");
+  };
+
+  const settled = await facilitator.settle(payload, requirements);
+  assert.equal(settled.success, true);
+  assert.equal(settled.transaction, confirmedHash);
+  assert.equal(settled.payer, account.address);
+  assert.equal(reconciliationCalls, 2);
+});
+
+test("settle keeps an unreconciled submission error as hl_exchange_error", async () => {
+  const payload = await signedPaymentPayload();
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as FacilitatorInternals;
+  internals.findConfirmedTransaction = async () => undefined;
+  internals.submitToExchange = async () => {
+    throw new Error("exchange unavailable");
+  };
+
+  const settled = await facilitator.settle(payload, requirements);
+  assert.equal(settled.success, false);
+  assert.equal(settled.errorReason, "hl_exchange_error");
 });
 
 test("facilitator recognizes the public spotTransfer ledger candidate shape", () => {

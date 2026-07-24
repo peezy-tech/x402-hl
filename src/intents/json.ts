@@ -39,6 +39,11 @@ function serializeJson(value: unknown, ancestors: Set<object>): string {
 
   try {
     if (Array.isArray(value)) {
+      for (let index = 0; index < value.length; index += 1) {
+        if (!Object.hasOwn(value, index)) {
+          throw new TypeError("Sparse arrays are not valid JSON");
+        }
+      }
       return `[${value.map(item => serializeJson(item, ancestors)).join(",")}]`;
     }
 

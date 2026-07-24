@@ -15,7 +15,6 @@ import {
   encodeFunctionData,
   getAddress,
   keccak256,
-  toBytes,
   toFunctionSelector,
 } from "viem";
 import type { Address, Hex } from "viem";
@@ -23,6 +22,7 @@ import type { IntentSigner } from "x402-hl/intents";
 import {
   X402_HL_INTENTS_EXTRA_KEY,
   attachSignedExecutionIntent,
+  hashIntentText,
 } from "x402-hl/intents";
 import {
   signDeclaredExecutionIntent,
@@ -96,6 +96,7 @@ export function createTransferQuote(input: TransferQuoteInput): {
   paymentIdentifier: string;
 } {
   const recipient = getAddress(input.recipient);
+  const paymentIdentifierHash = hashIntentText(input.paymentIdentifier);
   const quote = createIntentQuote({
     id: input.quoteId,
     network: HYPERLIQUID_TESTNET,
@@ -123,7 +124,7 @@ export function createTransferQuote(input: TransferQuoteInput): {
       metadata: {
         operation: "erc20-transfer",
         tokenAmount: input.tokenAmount.toString(),
-        paymentIdentifierHash: keccak256(toBytes(input.paymentIdentifier)),
+        paymentIdentifierHash: paymentIdentifierHash,
       },
     },
   });
@@ -141,7 +142,7 @@ export function createTransferQuote(input: TransferQuoteInput): {
       [X402_HL_INTENTS_EXTRA_KEY]: quote.paymentExtra,
       decimals: 8,
       tokenSymbol: "USDC",
-      paymentIdentifierHash: keccak256(toBytes(input.paymentIdentifier)),
+      paymentIdentifierHash: paymentIdentifierHash,
     },
   } satisfies PaymentRequirements;
 
@@ -219,9 +220,11 @@ export async function signClientIntent(input: {
  * Minimal durable adapter boundary. The database implementation must execute
  * both writes transactionally and return the library conflict types.
  *
- * `insertPaid` maps `INSERT ... ON CONFLICT` results. `compareAndSwap` uses a
- * predicate over intent_hash, revision, status, and claim_token. Both methods
- * must return the row that won a conflict so a worker can reconcile safely.
+ * `insertPaid` atomically inserts either the primary intent payment or a
+ * refund-only duplicate payment and maps `INSERT ... ON CONFLICT` results.
+ * `compareAndSwap` uses the payment identity, revision, status, and claim token.
+ * Both methods must return the row that won a conflict so a worker can
+ * reconcile safely.
  */
 export interface PostgresIntentTransaction {
   insertPaid(
@@ -237,6 +240,10 @@ export interface PostgresIntentDatabase {
     operation: (transaction: PostgresIntentTransaction) => Promise<T>,
   ): Promise<T>;
   findByIntentHash(intentHash: string): Promise<unknown | undefined>;
+  findByPayment(
+    paymentNetwork: string,
+    paymentTransaction: string,
+  ): Promise<unknown | undefined>;
 }
 
 /**
@@ -244,29 +251,38 @@ export interface PostgresIntentDatabase {
  * Store the validated record as JSONB while duplicating concurrency/index keys.
  */
 export const POSTGRES_INTENT_STORE_DDL = `
-CREATE TABLE x402_intent_execution (
-  intent_hash text PRIMARY KEY,
+CREATE TABLE x402_intent_payment (
+  payment_network text NOT NULL,
+  payment_transaction text NOT NULL
+    CHECK (payment_transaction = lower(payment_transaction)),
+  intent_hash text NOT NULL CHECK (intent_hash = lower(intent_hash)),
+  primary_payment boolean NOT NULL,
   application text NOT NULL,
   gateway text NOT NULL,
   quote_id text NOT NULL,
-  payment_network text NOT NULL,
-  payment_transaction text NOT NULL,
   execution_network text,
-  execution_transaction text,
+  execution_transaction text
+    CHECK (execution_transaction IS NULL OR execution_transaction = lower(execution_transaction)),
   refund_network text,
-  refund_transaction text,
+  refund_transaction text
+    CHECK (refund_transaction IS NULL OR refund_transaction = lower(refund_transaction)),
   revision integer NOT NULL,
   status text NOT NULL,
   claim_token text,
   record jsonb NOT NULL,
-  UNIQUE (application, gateway, quote_id),
-  UNIQUE (payment_network, payment_transaction)
+  PRIMARY KEY (payment_network, payment_transaction)
 );
+CREATE UNIQUE INDEX x402_intent_primary
+  ON x402_intent_payment (intent_hash)
+  WHERE primary_payment;
+CREATE UNIQUE INDEX x402_intent_quote
+  ON x402_intent_payment (application, gateway, quote_id)
+  WHERE primary_payment;
 CREATE UNIQUE INDEX x402_intent_execution_tx
-  ON x402_intent_execution (execution_network, execution_transaction)
+  ON x402_intent_payment (execution_network, execution_transaction)
   WHERE execution_transaction IS NOT NULL;
 CREATE UNIQUE INDEX x402_intent_refund_tx
-  ON x402_intent_execution (refund_network, refund_transaction)
+  ON x402_intent_payment (refund_network, refund_transaction)
   WHERE refund_transaction IS NOT NULL;
 `;
 
@@ -284,6 +300,17 @@ export class PostgresIntentExecutionStore implements IntentExecutionStore {
 
   async get(intentHash: string): Promise<IntentExecutionRecord | undefined> {
     const row = await this.database.findByIntentHash(intentHash.toLowerCase());
+    return row == null ? undefined : IntentExecutionRecordSchema.parse(row);
+  }
+
+  async getPayment(
+    paymentNetwork: string,
+    paymentTransaction: string,
+  ): Promise<IntentExecutionRecord | undefined> {
+    const row = await this.database.findByPayment(
+      paymentNetwork,
+      paymentTransaction.toLowerCase(),
+    );
     return row == null ? undefined : IntentExecutionRecordSchema.parse(row);
   }
 
@@ -497,12 +524,37 @@ export interface SafeAuditLogger {
     fields: {
       intentHash: string;
       paymentIdentifierHash: string;
+      paymentTransaction: string;
       status: IntentExecutionRecord["status"];
       executionTransaction?: string;
       refundTransaction?: string;
       failureReason?: string;
     },
   ): void;
+}
+
+function validatePaymentIdentifierBinding(input: {
+  paymentPayload: PaymentPayload;
+  paymentRequirements: PaymentRequirements;
+  quote: ResolvedIntentQuote;
+}): Hex {
+  const { id, validation } = extractAndValidatePaymentIdentifier(
+    input.paymentPayload,
+  );
+  if (!validation.valid || !id) {
+    throw new Error(
+      validation.errors?.join("; ") ?? "Payment identifier is required",
+    );
+  }
+
+  const identifierHash = hashIntentText(id);
+  if (
+    input.quote.intent.metadata?.paymentIdentifierHash !== identifierHash ||
+    input.paymentRequirements.extra.paymentIdentifierHash !== identifierHash
+  ) {
+    throw new Error("Payment identifier does not match the signed quote");
+  }
+  return identifierHash;
 }
 
 /**
@@ -521,6 +573,7 @@ export async function verifyIntentBeforeSettlement(input: {
   quote: ResolvedIntentQuote;
   nowSeconds: number;
 }): Promise<void> {
+  validatePaymentIdentifierBinding(input);
   const verified = await input.executor.verifyBeforeSettlement({
     paymentPayload: input.paymentPayload,
     paymentRequirements: input.paymentRequirements,
@@ -547,24 +600,8 @@ export async function executeSettledIntent(input: {
   nowSeconds: number;
   logger: SafeAuditLogger;
 }): Promise<IntentExecutionRecord> {
-  // Run the payment-identifier extension's validation before settlement in the
-  // HTTP pipeline. Repeating it here is defense-in-depth, not a substitute for
-  // refunding any order that was paid before an application-level check failed.
-  const { id, validation } = extractAndValidatePaymentIdentifier(
-    input.paymentPayload,
-  );
-  if (!validation.valid || !id) {
-    throw new Error(
-      validation.errors?.join("; ") ?? "Payment identifier is required",
-    );
-  }
-  const identifierHash = keccak256(toBytes(id));
-  if (
-    input.quote.intent.metadata?.paymentIdentifierHash !== identifierHash ||
-    input.paymentRequirements.extra.paymentIdentifierHash !== identifierHash
-  ) {
-    throw new Error("Payment identifier does not match the signed quote");
-  }
+  // Repeat the pre-settlement payment-identifier validation as defense in depth.
+  const identifierHash = validatePaymentIdentifierBinding(input);
 
   const record = await input.executor.execute({
     paymentPayload: input.paymentPayload,
@@ -580,6 +617,7 @@ export async function executeSettledIntent(input: {
   input.logger.info("intent_execution_finalized", {
     intentHash: record.intentHash,
     paymentIdentifierHash: identifierHash,
+    paymentTransaction: record.paymentTransaction,
     status: record.status,
     executionTransaction: record.executionTransaction,
     refundTransaction: record.refundTransaction,

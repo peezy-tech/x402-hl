@@ -25,6 +25,7 @@ export type IntentStoreConflictKey =
 export type IntentStoreRegistrationResult =
   | { kind: "created"; record: IntentExecutionRecord }
   | { kind: "existing"; record: IntentExecutionRecord }
+  | { kind: "duplicate_payment"; record: IntentExecutionRecord }
   | {
       kind: "conflict";
       key: IntentStoreConflictKey;
@@ -43,7 +44,7 @@ export interface IntentExecutionTransitionPatch {
   metadata?: Record<string, JsonValue>;
 }
 
-export interface IntentExecutionTransition {
+interface IntentExecutionTransitionBase {
   intentHash: string;
   expectedRevision: number;
   from: IntentExecutionStatus;
@@ -52,6 +53,17 @@ export interface IntentExecutionTransition {
   claimToken?: string;
   patch?: IntentExecutionTransitionPatch;
 }
+
+export type IntentExecutionTransition = IntentExecutionTransitionBase &
+  (
+    | { paymentNetwork?: never; paymentTransaction?: never }
+    | {
+        /** Selects a duplicate-payment record instead of the primary intent record. */
+        paymentNetwork: string;
+        /** Selects a duplicate-payment record instead of the primary intent record. */
+        paymentTransaction: string;
+      }
+  );
 
 export type IntentStoreTransitionResult =
   | { kind: "updated"; record: IntentExecutionRecord }
@@ -65,18 +77,29 @@ export type IntentStoreTransitionResult =
 /**
  * Durable adapters must implement each method atomically.
  *
- * `registerPaid` requires unique indexes on intent hash,
- * (application, gateway, quote id), and (payment network, payment transaction).
- * `transition` is a compare-and-swap over revision, status, and claim token.
- * Implementations must also enforce unique execution and refund transactions.
+ * `registerPaid` requires unique indexes on the primary intent hash,
+ * (application, gateway, quote id), and every (payment network, payment
+ * transaction). A second transaction for the same intent must be inserted as a
+ * duplicate-payment refund record by that same atomic operation. `transition`
+ * is a compare-and-swap over payment identity, revision, status, and claim
+ * token. Implementations must also enforce unique execution and refund
+ * transactions across primary and duplicate-payment records.
  */
 export interface IntentExecutionStore {
   registerPaid(record: IntentExecutionRecord): Promise<IntentStoreRegistrationResult>;
   get(intentHash: string): Promise<IntentExecutionRecord | undefined>;
+  getPayment(
+    paymentNetwork: string,
+    paymentTransaction: string,
+  ): Promise<IntentExecutionRecord | undefined>;
   transition(
     transition: IntentExecutionTransition,
   ): Promise<IntentStoreTransitionResult>;
 }
+
+type RecordLocator =
+  | { kind: "primary"; intentKey: string }
+  | { kind: "duplicate"; paymentKey: string };
 
 /**
  * Single-process development/test store. It is not durable and must not be used
@@ -84,8 +107,9 @@ export interface IntentExecutionStore {
  */
 export class InMemoryIntentExecutionStore implements IntentExecutionStore {
   private readonly records = new Map<string, IntentExecutionRecord>();
+  private readonly duplicatePayments = new Map<string, IntentExecutionRecord>();
   private readonly quotes = new Map<string, string>();
-  private readonly payments = new Map<string, string>();
+  private readonly payments = new Map<string, RecordLocator>();
   private readonly executions = new Map<string, string>();
   private readonly refunds = new Map<string, string>();
 
@@ -94,15 +118,58 @@ export class InMemoryIntentExecutionStore implements IntentExecutionStore {
   ): Promise<IntentStoreRegistrationResult> {
     const record = IntentExecutionRecordSchema.parse(input);
     const intentKey = normalizeHash(record.intentHash);
+    const paymentKey = transactionIndex(
+      record.paymentNetwork,
+      record.paymentTransaction,
+    );
+
+    const paymentOwner = this.payments.get(paymentKey);
+    if (paymentOwner) {
+      const paymentRecord = this.recordForLocator(paymentOwner);
+      if (paymentRecord && samePaymentRegistration(paymentRecord, record)) {
+        return paymentRecord.duplicatePayment
+          ? { kind: "duplicate_payment", record: cloneRecord(paymentRecord) }
+          : { kind: "existing", record: cloneRecord(paymentRecord) };
+      }
+      return {
+        kind: "conflict",
+        key: "payment_transaction",
+        record: paymentRecord ? cloneRecord(paymentRecord) : undefined,
+      };
+    }
+
     const existing = this.records.get(intentKey);
     if (existing) {
-      return sameRegistration(existing, record)
-        ? { kind: "existing", record: cloneRecord(existing) }
-        : {
-            kind: "conflict",
-            key: "intent_hash",
-            record: cloneRecord(existing),
-          };
+      if (!sameIntentRegistration(existing, record)) {
+        return {
+          kind: "conflict",
+          key: "intent_hash",
+          record: cloneRecord(existing),
+        };
+      }
+
+      const duplicate = IntentExecutionRecordSchema.parse({
+        ...record,
+        revision: 0,
+        status: "refund_pending",
+        duplicatePayment: true,
+        executionNetwork: undefined,
+        executionTransaction: undefined,
+        refundNetwork: undefined,
+        refundTransaction: undefined,
+        executionAttempts: 0,
+        refundAttempts: 0,
+        claimToken: undefined,
+        failure: {
+          reason: "duplicate_payment",
+          message: "An additional settled payment for this intent must be refunded",
+          retryable: true,
+        },
+        updatedAt: new Date().toISOString(),
+      });
+      this.duplicatePayments.set(paymentKey, cloneRecord(duplicate));
+      this.payments.set(paymentKey, { kind: "duplicate", paymentKey });
+      return { kind: "duplicate_payment", record: cloneRecord(duplicate) };
     }
 
     const quoteKey = quoteIndex(record);
@@ -115,23 +182,10 @@ export class InMemoryIntentExecutionStore implements IntentExecutionStore {
       };
     }
 
-    const paymentKey = transactionIndex(
-      record.paymentNetwork,
-      record.paymentTransaction,
-    );
-    const paymentOwner = this.payments.get(paymentKey);
-    if (paymentOwner) {
-      return {
-        kind: "conflict",
-        key: "payment_transaction",
-        record: cloneRecord(this.records.get(paymentOwner) as IntentExecutionRecord),
-      };
-    }
-
     const stored = cloneRecord(record);
     this.records.set(intentKey, stored);
     this.quotes.set(quoteKey, intentKey);
-    this.payments.set(paymentKey, intentKey);
+    this.payments.set(paymentKey, { kind: "primary", intentKey });
     return { kind: "created", record: cloneRecord(stored) };
   }
 
@@ -140,12 +194,26 @@ export class InMemoryIntentExecutionStore implements IntentExecutionStore {
     return record ? cloneRecord(record) : undefined;
   }
 
+  async getPayment(
+    paymentNetwork: string,
+    paymentTransaction: string,
+  ): Promise<IntentExecutionRecord | undefined> {
+    const locator = this.payments.get(
+      transactionIndex(paymentNetwork, paymentTransaction),
+    );
+    const record = locator ? this.recordForLocator(locator) : undefined;
+    return record ? cloneRecord(record) : undefined;
+  }
+
   async transition(
     input: IntentExecutionTransition,
   ): Promise<IntentStoreTransitionResult> {
-    const intentKey = normalizeHash(input.intentHash);
-    const current = this.records.get(intentKey);
-    if (!current) return { kind: "not_found" };
+    const locator = this.transitionLocator(input);
+    const current = locator ? this.recordForLocator(locator) : undefined;
+    if (!locator || !current) return { kind: "not_found" };
+    if (normalizeHash(current.intentHash) !== normalizeHash(input.intentHash)) {
+      return { kind: "not_found" };
+    }
     if (current.revision !== input.expectedRevision) {
       return {
         kind: "conflict",
@@ -183,7 +251,8 @@ export class InMemoryIntentExecutionStore implements IntentExecutionStore {
       updatedAt: new Date().toISOString(),
     });
 
-    const transactionConflict = this.transactionConflict(intentKey, current, next);
+    const ownerKey = locatorKey(locator);
+    const transactionConflict = this.transactionConflict(ownerKey, current, next);
     if (transactionConflict) {
       return {
         kind: "conflict",
@@ -192,24 +261,58 @@ export class InMemoryIntentExecutionStore implements IntentExecutionStore {
       };
     }
 
-    this.records.set(intentKey, cloneRecord(next));
+    this.storeForLocator(locator, next);
     if (next.executionNetwork && next.executionTransaction) {
       this.executions.set(
         transactionIndex(next.executionNetwork, next.executionTransaction),
-        intentKey,
+        ownerKey,
       );
     }
     if (next.refundNetwork && next.refundTransaction) {
       this.refunds.set(
         transactionIndex(next.refundNetwork, next.refundTransaction),
-        intentKey,
+        ownerKey,
       );
     }
     return { kind: "updated", record: cloneRecord(next) };
   }
 
+  private transitionLocator(
+    input: IntentExecutionTransition,
+  ): RecordLocator | undefined {
+    const hasPaymentNetwork = typeof input.paymentNetwork === "string";
+    const hasPaymentTransaction = typeof input.paymentTransaction === "string";
+    if (hasPaymentNetwork !== hasPaymentTransaction) return undefined;
+    if (hasPaymentNetwork && hasPaymentTransaction) {
+      return this.payments.get(
+        transactionIndex(input.paymentNetwork!, input.paymentTransaction!),
+      );
+    }
+    const intentKey = normalizeHash(input.intentHash);
+    return this.records.has(intentKey)
+      ? { kind: "primary", intentKey }
+      : undefined;
+  }
+
+  private recordForLocator(locator: RecordLocator): IntentExecutionRecord | undefined {
+    return locator.kind === "primary"
+      ? this.records.get(locator.intentKey)
+      : this.duplicatePayments.get(locator.paymentKey);
+  }
+
+  private storeForLocator(
+    locator: RecordLocator,
+    record: IntentExecutionRecord,
+  ): void {
+    if (locator.kind === "primary") {
+      this.records.set(locator.intentKey, cloneRecord(record));
+    } else {
+      this.duplicatePayments.set(locator.paymentKey, cloneRecord(record));
+    }
+  }
+
   private transactionConflict(
-    intentKey: string,
+    ownerKey: string,
     current: IntentExecutionRecord,
     next: IntentExecutionRecord,
   ): "execution_transaction" | "refund_transaction" | undefined {
@@ -222,7 +325,7 @@ export class InMemoryIntentExecutionStore implements IntentExecutionStore {
       const owner = this.executions.get(
         transactionIndex(next.executionNetwork, next.executionTransaction),
       );
-      if (owner && owner !== intentKey) return "execution_transaction";
+      if (owner && owner !== ownerKey) return "execution_transaction";
     }
     if (
       next.refundNetwork &&
@@ -233,7 +336,7 @@ export class InMemoryIntentExecutionStore implements IntentExecutionStore {
       const owner = this.refunds.get(
         transactionIndex(next.refundNetwork, next.refundTransaction),
       );
-      if (owner && owner !== intentKey) return "refund_transaction";
+      if (owner && owner !== ownerKey) return "refund_transaction";
     }
     return undefined;
   }
@@ -278,18 +381,34 @@ function isLegalTransition(
   return LEGAL_TRANSITIONS[from].includes(to);
 }
 
-function sameRegistration(
+function sameIntentRegistration(
   left: IntentExecutionRecord,
   right: IntentExecutionRecord,
 ): boolean {
   return (
     normalizeHash(left.intentHash) === normalizeHash(right.intentHash) &&
+    left.intentTemplateHash.toLowerCase() ===
+      right.intentTemplateHash.toLowerCase() &&
     left.application === right.application &&
     left.gateway.toLowerCase() === right.gateway.toLowerCase() &&
     left.quoteId === right.quoteId &&
     left.paymentRequirementsHash.toLowerCase() ===
       right.paymentRequirementsHash.toLowerCase() &&
+    left.payer.toLowerCase() === right.payer.toLowerCase() &&
+    left.paymentScheme === right.paymentScheme &&
     left.paymentNetwork === right.paymentNetwork &&
+    left.paymentAsset === right.paymentAsset &&
+    left.paymentAmount === right.paymentAmount &&
+    left.paymentPayTo.toLowerCase() === right.paymentPayTo.toLowerCase()
+  );
+}
+
+function samePaymentRegistration(
+  left: IntentExecutionRecord,
+  right: IntentExecutionRecord,
+): boolean {
+  return (
+    sameIntentRegistration(left, right) &&
     left.paymentTransaction.toLowerCase() ===
       right.paymentTransaction.toLowerCase()
   );
@@ -309,6 +428,12 @@ function quoteIndex(record: IntentExecutionRecord): string {
 
 function transactionIndex(network: string, transaction: string): string {
   return `${network}\u0000${transaction.toLowerCase()}`;
+}
+
+function locatorKey(locator: RecordLocator): string {
+  return locator.kind === "primary"
+    ? `intent\u0000${locator.intentKey}`
+    : `payment\u0000${locator.paymentKey}`;
 }
 
 function cloneRecord(record: IntentExecutionRecord): IntentExecutionRecord {

@@ -10,6 +10,7 @@ import {
   HyperEvmExecutionIntent,
   HyperEvmExecutionIntentInput,
   HyperEvmExecutionIntentSchema,
+  JsonRecordSchema,
   X402_HL_INTENT_DOMAIN_NAME,
   X402_HL_INTENT_DOMAIN_VERSION,
   X402_HL_INTENT_VERSION,
@@ -48,9 +49,18 @@ export interface ExecutionIntentPaymentBinding {
 export function normalizeExecutionIntent(
   input: HyperEvmExecutionIntentInput,
 ): HyperEvmExecutionIntent {
-  const calculatedMetadataHash = hashIntentMetadata(input.metadata);
+  const metadata =
+    input.metadata == null ? undefined : JsonRecordSchema.parse(input.metadata);
   if (
     input.metadata != null &&
+    stableJson(input.metadata) !== stableJson(metadata)
+  ) {
+    throw new Error("Intent metadata is not canonical JSON");
+  }
+
+  const calculatedMetadataHash = hashIntentMetadata(metadata);
+  if (
+    metadata != null &&
     input.metadataHash != null &&
     input.metadataHash.toLowerCase() !== calculatedMetadataHash.toLowerCase()
   ) {
@@ -72,6 +82,7 @@ export function normalizeExecutionIntent(
     maxSlippageBps: input.maxSlippageBps ?? 0,
     quoteId: input.quoteId ?? input.nonce,
     metadataHash: input.metadataHash ?? calculatedMetadataHash,
+    metadata,
   };
 
   return HyperEvmExecutionIntentSchema.parse(intent);
@@ -135,8 +146,8 @@ export function buildExecutionIntentTypedData(
       maxGasCost: BigInt(intent.maxGasCost),
       maxSlippageBps: intent.maxSlippageBps,
       deadline: BigInt(intent.deadline),
-      nonce: normalizeBytes32(intent.nonce),
-      quoteId: normalizeBytes32(intent.quoteId),
+      nonce: hashIntentText(intent.nonce),
+      quoteId: hashIntentText(intent.quoteId),
       metadataHash: intent.metadataHash as Hex,
       paymentRequirementsHash,
     },

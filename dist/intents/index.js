@@ -23,6 +23,7 @@ var DecimalIntegerStringSchema = z.string().max(78).regex(DecimalIntegerRegex).r
   message: "Value exceeds the uint256 range"
 });
 var IntentApplicationSchema = z.string().trim().min(1).max(256);
+var PositiveSafeIntegerSchema = z.number().int().positive().safe();
 var JsonValueSchema = z.lazy(
   () => z.union([
     z.null(),
@@ -44,7 +45,7 @@ var HyperEvmExecutionIntentSchema = z.object({
   application: IntentApplicationSchema,
   gateway: NonZeroEvmAddressSchema,
   user: EvmAddressSchema,
-  chainId: z.number().int().positive(),
+  chainId: PositiveSafeIntegerSchema,
   target: EvmAddressSchema,
   callData: HexSchema,
   value: DecimalIntegerStringSchema,
@@ -52,7 +53,7 @@ var HyperEvmExecutionIntentSchema = z.object({
   refundAddress: NonZeroEvmAddressSchema,
   maxGasCost: DecimalIntegerStringSchema,
   maxSlippageBps: z.number().int().min(0).max(1e4),
-  deadline: z.number().int().positive(),
+  deadline: PositiveSafeIntegerSchema,
   nonce: z.string().min(1).max(256),
   quoteId: z.string().min(1).max(256),
   metadataHash: Bytes32Schema,
@@ -80,7 +81,7 @@ var IntentPaymentExtraSchema = z.object({
   quoteId: z.string().min(1).max(256),
   applicationHash: Bytes32Schema,
   gateway: EvmAddressSchema,
-  chainId: z.number().int().positive(),
+  chainId: PositiveSafeIntegerSchema,
   target: EvmAddressSchema,
   callDataHash: Bytes32Schema,
   value: DecimalIntegerStringSchema,
@@ -88,7 +89,7 @@ var IntentPaymentExtraSchema = z.object({
   refundAddress: EvmAddressSchema,
   maxGasCost: DecimalIntegerStringSchema,
   maxSlippageBps: z.number().int().min(0).max(1e4),
-  deadline: z.number().int().positive(),
+  deadline: PositiveSafeIntegerSchema,
   nonceHash: Bytes32Schema,
   metadataHash: Bytes32Schema
 });
@@ -136,6 +137,7 @@ var IntentFailureReasonSchema = z.enum([
   "execution_intent_expired",
   "invalid_execution_intent_signature",
   "execution_intent_payer_mismatch",
+  "duplicate_payment",
   "store_conflict",
   "policy_denied",
   "policy_binding_mismatch",
@@ -170,6 +172,7 @@ var IntentExecutionReceiptSchema = z.object({
   paymentAmount: z.string().min(1),
   paymentPayTo: z.string().min(1),
   paymentTransaction: z.string().min(1),
+  duplicatePayment: z.literal(true).optional(),
   executionNetwork: z.string().optional(),
   executionTransaction: z.string().optional(),
   refundNetwork: z.string().optional(),
@@ -219,6 +222,11 @@ function serializeJson(value, ancestors) {
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
+      for (let index = 0; index < value.length; index += 1) {
+        if (!Object.hasOwn(value, index)) {
+          throw new TypeError("Sparse arrays are not valid JSON");
+        }
+      }
       return `[${value.map((item) => serializeJson(item, ancestors)).join(",")}]`;
     }
     if (!isPlainObject(value)) {
@@ -269,8 +277,12 @@ var X402_HL_INTENT_TYPES = {
   ]
 };
 function normalizeExecutionIntent(input) {
-  const calculatedMetadataHash = hashIntentMetadata(input.metadata);
-  if (input.metadata != null && input.metadataHash != null && input.metadataHash.toLowerCase() !== calculatedMetadataHash.toLowerCase()) {
+  const metadata = input.metadata == null ? void 0 : JsonRecordSchema.parse(input.metadata);
+  if (input.metadata != null && stableJson(input.metadata) !== stableJson(metadata)) {
+    throw new Error("Intent metadata is not canonical JSON");
+  }
+  const calculatedMetadataHash = hashIntentMetadata(metadata);
+  if (metadata != null && input.metadataHash != null && input.metadataHash.toLowerCase() !== calculatedMetadataHash.toLowerCase()) {
     throw new Error("Intent metadataHash does not match canonical metadata");
   }
   const intent = {
@@ -287,7 +299,8 @@ function normalizeExecutionIntent(input) {
     maxGasCost: input.maxGasCost ?? "0",
     maxSlippageBps: input.maxSlippageBps ?? 0,
     quoteId: input.quoteId ?? input.nonce,
-    metadataHash: input.metadataHash ?? calculatedMetadataHash
+    metadataHash: input.metadataHash ?? calculatedMetadataHash,
+    metadata
   };
   return HyperEvmExecutionIntentSchema.parse(intent);
 }
@@ -329,8 +342,8 @@ function buildExecutionIntentTypedData(input, binding) {
       maxGasCost: BigInt(intent.maxGasCost),
       maxSlippageBps: intent.maxSlippageBps,
       deadline: BigInt(intent.deadline),
-      nonce: normalizeBytes32(intent.nonce),
-      quoteId: normalizeBytes32(intent.quoteId),
+      nonce: hashIntentText(intent.nonce),
+      quoteId: hashIntentText(intent.quoteId),
       metadataHash: intent.metadataHash,
       paymentRequirementsHash
     }
@@ -378,7 +391,7 @@ function createIntentPaymentExtra(intent, intentTemplateHash = hashExecutionInte
     maxGasCost: intent.maxGasCost,
     maxSlippageBps: intent.maxSlippageBps,
     deadline: intent.deadline,
-    nonceHash: normalizeBytes32(intent.nonce),
+    nonceHash: hashIntentText(intent.nonce),
     metadataHash: intent.metadataHash
   });
 }
@@ -472,7 +485,7 @@ function verifyIntentPaymentExtra(intent, requirements) {
       "Payment requirements contain a different execution deadline"
     ],
     [
-      extra.nonceHash.toLowerCase() === normalizeBytes32(intent.nonce).toLowerCase(),
+      extra.nonceHash.toLowerCase() === hashIntentText(intent.nonce).toLowerCase(),
       "nonce_mismatch",
       "Payment requirements contain a different execution nonce"
     ],
@@ -626,6 +639,7 @@ export {
   JsonRecordSchema,
   JsonValueSchema,
   NonZeroEvmAddressSchema,
+  PositiveSafeIntegerSchema,
   SignedHyperEvmExecutionIntentSchema,
   TERMINAL_INTENT_EXECUTION_STATUSES,
   UINT256_MAX,

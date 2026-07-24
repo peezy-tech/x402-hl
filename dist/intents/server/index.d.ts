@@ -1,5 +1,5 @@
 import { HyperEvmExecutionIntentInput, HyperEvmExecutionIntent, IntentDeclaration, IntentPaymentExtra, ExecutionIntentDomain, IntentFailureReason, IntentExecutionReceipt, IntentExecutionStatus, JsonValue } from '../index.js';
-export { Bytes32Schema, CanonicalPaymentRequirements, DecimalIntegerStringSchema, EvmAddressSchema, ExecutionIntentDomainSchema, ExecutionIntentPaymentBinding, HexSchema, HyperEvmExecutionIntentSchema, IntentApplicationSchema, IntentBindingFailure, IntentBindingResult, IntentDeclarationOptions, IntentDeclarationSchema, IntentExecutionMode, IntentExecutionModeSchema, IntentExecutionReceiptSchema, IntentExecutionStatusSchema, IntentFailure, IntentFailureReasonSchema, IntentFailureSchema, IntentPaymentExtraSchema, IntentSigner, JsonRecordSchema, JsonValueSchema, NonZeroEvmAddressSchema, SignExecutionIntentOptions, SignedHyperEvmExecutionIntent, SignedHyperEvmExecutionIntentSchema, TERMINAL_INTENT_EXECUTION_STATUSES, UINT256_MAX, X402_HL_INTENTS_EXTENSION, X402_HL_INTENTS_EXTRA_KEY, X402_HL_INTENT_DOMAIN_NAME, X402_HL_INTENT_DOMAIN_VERSION, X402_HL_INTENT_PRIMARY_TYPE, X402_HL_INTENT_TYPES, X402_HL_INTENT_VERSION, ZERO_ADDRESS, ZERO_BYTES32, attachSignedExecutionIntent, buildExecutionIntentTypedData, canonicalizePaymentRequirements, createIntentDeclaration, createIntentPaymentExtra, getIntentSignerAddress, hashExecutionIntent, hashExecutionIntentTemplate, hashIntentMetadata, hashIntentText, hashPaymentRequirements, isTerminalIntentExecutionStatus, normalizeBytes32, normalizeExecutionIntent, readIntentDeclaration, readIntentPaymentExtra, readSignedExecutionIntent, recoverExecutionIntentSigner, signExecutionIntent, stableJson, verifyExecutionIntentSignature, verifyIntentPaymentExtra } from '../index.js';
+export { Bytes32Schema, CanonicalPaymentRequirements, DecimalIntegerStringSchema, EvmAddressSchema, ExecutionIntentDomainSchema, ExecutionIntentPaymentBinding, HexSchema, HyperEvmExecutionIntentSchema, IntentApplicationSchema, IntentBindingFailure, IntentBindingResult, IntentDeclarationOptions, IntentDeclarationSchema, IntentExecutionMode, IntentExecutionModeSchema, IntentExecutionReceiptSchema, IntentExecutionStatusSchema, IntentFailure, IntentFailureReasonSchema, IntentFailureSchema, IntentPaymentExtraSchema, IntentSigner, JsonRecordSchema, JsonValueSchema, NonZeroEvmAddressSchema, PositiveSafeIntegerSchema, SignExecutionIntentOptions, SignedHyperEvmExecutionIntent, SignedHyperEvmExecutionIntentSchema, TERMINAL_INTENT_EXECUTION_STATUSES, UINT256_MAX, X402_HL_INTENTS_EXTENSION, X402_HL_INTENTS_EXTRA_KEY, X402_HL_INTENT_DOMAIN_NAME, X402_HL_INTENT_DOMAIN_VERSION, X402_HL_INTENT_PRIMARY_TYPE, X402_HL_INTENT_TYPES, X402_HL_INTENT_VERSION, ZERO_ADDRESS, ZERO_BYTES32, attachSignedExecutionIntent, buildExecutionIntentTypedData, canonicalizePaymentRequirements, createIntentDeclaration, createIntentPaymentExtra, getIntentSignerAddress, hashExecutionIntent, hashExecutionIntentTemplate, hashIntentMetadata, hashIntentText, hashPaymentRequirements, isTerminalIntentExecutionStatus, normalizeBytes32, normalizeExecutionIntent, readIntentDeclaration, readIntentPaymentExtra, readSignedExecutionIntent, recoverExecutionIntentSigner, signExecutionIntent, stableJson, verifyExecutionIntentSignature, verifyIntentPaymentExtra } from '../index.js';
 import { Price, SettleResponse, PaymentPayload, PaymentRequirements } from '@x402/core/types';
 import { RouteConfig } from '@x402/core/server';
 import { Hex, Address } from 'viem';
@@ -102,6 +102,7 @@ declare const IntentExecutionRecordSchema: zod.ZodObject<{
     paymentAmount: zod.ZodString;
     paymentPayTo: zod.ZodString;
     paymentTransaction: zod.ZodString;
+    duplicatePayment: zod.ZodOptional<zod.ZodLiteral<true>>;
     executionNetwork: zod.ZodOptional<zod.ZodString>;
     executionTransaction: zod.ZodOptional<zod.ZodString>;
     refundNetwork: zod.ZodOptional<zod.ZodString>;
@@ -109,16 +110,16 @@ declare const IntentExecutionRecordSchema: zod.ZodObject<{
     executionAttempts: zod.ZodNumber;
     refundAttempts: zod.ZodNumber;
     failure: zod.ZodOptional<zod.ZodObject<{
-        reason: zod.ZodEnum<["malformed_extension_payload", "missing_execution_intent", "missing_intent_requirement", "missing_settlement", "unsuccessful_settlement", "missing_settled_payer", "missing_settlement_transaction", "settlement_network_mismatch", "settlement_amount_mismatch", "payment_payload_requirements_mismatch", "payment_requirements_hash_mismatch", "intent_template_hash_mismatch", "intent_hash_mismatch", "quote_mismatch", "application_mismatch", "gateway_mismatch", "chain_mismatch", "target_mismatch", "calldata_mismatch", "value_mismatch", "recipient_mismatch", "refund_address_mismatch", "gas_limit_mismatch", "slippage_limit_mismatch", "deadline_mismatch", "nonce_mismatch", "metadata_mismatch", "execution_intent_expired", "invalid_execution_intent_signature", "execution_intent_payer_mismatch", "store_conflict", "policy_denied", "policy_binding_mismatch", "simulation_failed", "gas_cost_exceeded", "slippage_exceeded", "execution_failed", "execution_uncertain", "refund_failed", "refund_uncertain", "invalid_state"]>;
+        reason: zod.ZodEnum<["malformed_extension_payload", "missing_execution_intent", "missing_intent_requirement", "missing_settlement", "unsuccessful_settlement", "missing_settled_payer", "missing_settlement_transaction", "settlement_network_mismatch", "settlement_amount_mismatch", "payment_payload_requirements_mismatch", "payment_requirements_hash_mismatch", "intent_template_hash_mismatch", "intent_hash_mismatch", "quote_mismatch", "application_mismatch", "gateway_mismatch", "chain_mismatch", "target_mismatch", "calldata_mismatch", "value_mismatch", "recipient_mismatch", "refund_address_mismatch", "gas_limit_mismatch", "slippage_limit_mismatch", "deadline_mismatch", "nonce_mismatch", "metadata_mismatch", "execution_intent_expired", "invalid_execution_intent_signature", "execution_intent_payer_mismatch", "duplicate_payment", "store_conflict", "policy_denied", "policy_binding_mismatch", "simulation_failed", "gas_cost_exceeded", "slippage_exceeded", "execution_failed", "execution_uncertain", "refund_failed", "refund_uncertain", "invalid_state"]>;
         message: zod.ZodString;
         retryable: zod.ZodBoolean;
     }, "strip", zod.ZodTypeAny, {
         message: string;
-        reason: "execution_failed" | "refund_failed" | "malformed_extension_payload" | "missing_execution_intent" | "missing_intent_requirement" | "missing_settlement" | "unsuccessful_settlement" | "missing_settled_payer" | "missing_settlement_transaction" | "settlement_network_mismatch" | "settlement_amount_mismatch" | "payment_payload_requirements_mismatch" | "payment_requirements_hash_mismatch" | "intent_template_hash_mismatch" | "intent_hash_mismatch" | "quote_mismatch" | "application_mismatch" | "gateway_mismatch" | "chain_mismatch" | "target_mismatch" | "calldata_mismatch" | "value_mismatch" | "recipient_mismatch" | "refund_address_mismatch" | "gas_limit_mismatch" | "slippage_limit_mismatch" | "deadline_mismatch" | "nonce_mismatch" | "metadata_mismatch" | "execution_intent_expired" | "invalid_execution_intent_signature" | "execution_intent_payer_mismatch" | "store_conflict" | "policy_denied" | "policy_binding_mismatch" | "simulation_failed" | "gas_cost_exceeded" | "slippage_exceeded" | "execution_uncertain" | "refund_uncertain" | "invalid_state";
+        reason: "execution_failed" | "refund_failed" | "malformed_extension_payload" | "missing_execution_intent" | "missing_intent_requirement" | "missing_settlement" | "unsuccessful_settlement" | "missing_settled_payer" | "missing_settlement_transaction" | "settlement_network_mismatch" | "settlement_amount_mismatch" | "payment_payload_requirements_mismatch" | "payment_requirements_hash_mismatch" | "intent_template_hash_mismatch" | "intent_hash_mismatch" | "quote_mismatch" | "application_mismatch" | "gateway_mismatch" | "chain_mismatch" | "target_mismatch" | "calldata_mismatch" | "value_mismatch" | "recipient_mismatch" | "refund_address_mismatch" | "gas_limit_mismatch" | "slippage_limit_mismatch" | "deadline_mismatch" | "nonce_mismatch" | "metadata_mismatch" | "execution_intent_expired" | "invalid_execution_intent_signature" | "execution_intent_payer_mismatch" | "duplicate_payment" | "store_conflict" | "policy_denied" | "policy_binding_mismatch" | "simulation_failed" | "gas_cost_exceeded" | "slippage_exceeded" | "execution_uncertain" | "refund_uncertain" | "invalid_state";
         retryable: boolean;
     }, {
         message: string;
-        reason: "execution_failed" | "refund_failed" | "malformed_extension_payload" | "missing_execution_intent" | "missing_intent_requirement" | "missing_settlement" | "unsuccessful_settlement" | "missing_settled_payer" | "missing_settlement_transaction" | "settlement_network_mismatch" | "settlement_amount_mismatch" | "payment_payload_requirements_mismatch" | "payment_requirements_hash_mismatch" | "intent_template_hash_mismatch" | "intent_hash_mismatch" | "quote_mismatch" | "application_mismatch" | "gateway_mismatch" | "chain_mismatch" | "target_mismatch" | "calldata_mismatch" | "value_mismatch" | "recipient_mismatch" | "refund_address_mismatch" | "gas_limit_mismatch" | "slippage_limit_mismatch" | "deadline_mismatch" | "nonce_mismatch" | "metadata_mismatch" | "execution_intent_expired" | "invalid_execution_intent_signature" | "execution_intent_payer_mismatch" | "store_conflict" | "policy_denied" | "policy_binding_mismatch" | "simulation_failed" | "gas_cost_exceeded" | "slippage_exceeded" | "execution_uncertain" | "refund_uncertain" | "invalid_state";
+        reason: "execution_failed" | "refund_failed" | "malformed_extension_payload" | "missing_execution_intent" | "missing_intent_requirement" | "missing_settlement" | "unsuccessful_settlement" | "missing_settled_payer" | "missing_settlement_transaction" | "settlement_network_mismatch" | "settlement_amount_mismatch" | "payment_payload_requirements_mismatch" | "payment_requirements_hash_mismatch" | "intent_template_hash_mismatch" | "intent_hash_mismatch" | "quote_mismatch" | "application_mismatch" | "gateway_mismatch" | "chain_mismatch" | "target_mismatch" | "calldata_mismatch" | "value_mismatch" | "recipient_mismatch" | "refund_address_mismatch" | "gas_limit_mismatch" | "slippage_limit_mismatch" | "deadline_mismatch" | "nonce_mismatch" | "metadata_mismatch" | "execution_intent_expired" | "invalid_execution_intent_signature" | "execution_intent_payer_mismatch" | "duplicate_payment" | "store_conflict" | "policy_denied" | "policy_binding_mismatch" | "simulation_failed" | "gas_cost_exceeded" | "slippage_exceeded" | "execution_uncertain" | "refund_uncertain" | "invalid_state";
         retryable: boolean;
     }>>;
     claimToken: zod.ZodOptional<zod.ZodString>;
@@ -222,13 +223,14 @@ declare const IntentExecutionRecordSchema: zod.ZodObject<{
     createdAt: string;
     updatedAt: string;
     metadata?: Record<string, JsonValue> | undefined;
+    duplicatePayment?: true | undefined;
     executionNetwork?: string | undefined;
     executionTransaction?: string | undefined;
     refundNetwork?: string | undefined;
     refundTransaction?: string | undefined;
     failure?: {
         message: string;
-        reason: "execution_failed" | "refund_failed" | "malformed_extension_payload" | "missing_execution_intent" | "missing_intent_requirement" | "missing_settlement" | "unsuccessful_settlement" | "missing_settled_payer" | "missing_settlement_transaction" | "settlement_network_mismatch" | "settlement_amount_mismatch" | "payment_payload_requirements_mismatch" | "payment_requirements_hash_mismatch" | "intent_template_hash_mismatch" | "intent_hash_mismatch" | "quote_mismatch" | "application_mismatch" | "gateway_mismatch" | "chain_mismatch" | "target_mismatch" | "calldata_mismatch" | "value_mismatch" | "recipient_mismatch" | "refund_address_mismatch" | "gas_limit_mismatch" | "slippage_limit_mismatch" | "deadline_mismatch" | "nonce_mismatch" | "metadata_mismatch" | "execution_intent_expired" | "invalid_execution_intent_signature" | "execution_intent_payer_mismatch" | "store_conflict" | "policy_denied" | "policy_binding_mismatch" | "simulation_failed" | "gas_cost_exceeded" | "slippage_exceeded" | "execution_uncertain" | "refund_uncertain" | "invalid_state";
+        reason: "execution_failed" | "refund_failed" | "malformed_extension_payload" | "missing_execution_intent" | "missing_intent_requirement" | "missing_settlement" | "unsuccessful_settlement" | "missing_settled_payer" | "missing_settlement_transaction" | "settlement_network_mismatch" | "settlement_amount_mismatch" | "payment_payload_requirements_mismatch" | "payment_requirements_hash_mismatch" | "intent_template_hash_mismatch" | "intent_hash_mismatch" | "quote_mismatch" | "application_mismatch" | "gateway_mismatch" | "chain_mismatch" | "target_mismatch" | "calldata_mismatch" | "value_mismatch" | "recipient_mismatch" | "refund_address_mismatch" | "gas_limit_mismatch" | "slippage_limit_mismatch" | "deadline_mismatch" | "nonce_mismatch" | "metadata_mismatch" | "execution_intent_expired" | "invalid_execution_intent_signature" | "execution_intent_payer_mismatch" | "duplicate_payment" | "store_conflict" | "policy_denied" | "policy_binding_mismatch" | "simulation_failed" | "gas_cost_exceeded" | "slippage_exceeded" | "execution_uncertain" | "refund_uncertain" | "invalid_state";
         retryable: boolean;
     } | undefined;
     claimToken?: string | undefined;
@@ -273,13 +275,14 @@ declare const IntentExecutionRecordSchema: zod.ZodObject<{
     createdAt: string;
     updatedAt: string;
     metadata?: Record<string, JsonValue> | undefined;
+    duplicatePayment?: true | undefined;
     executionNetwork?: string | undefined;
     executionTransaction?: string | undefined;
     refundNetwork?: string | undefined;
     refundTransaction?: string | undefined;
     failure?: {
         message: string;
-        reason: "execution_failed" | "refund_failed" | "malformed_extension_payload" | "missing_execution_intent" | "missing_intent_requirement" | "missing_settlement" | "unsuccessful_settlement" | "missing_settled_payer" | "missing_settlement_transaction" | "settlement_network_mismatch" | "settlement_amount_mismatch" | "payment_payload_requirements_mismatch" | "payment_requirements_hash_mismatch" | "intent_template_hash_mismatch" | "intent_hash_mismatch" | "quote_mismatch" | "application_mismatch" | "gateway_mismatch" | "chain_mismatch" | "target_mismatch" | "calldata_mismatch" | "value_mismatch" | "recipient_mismatch" | "refund_address_mismatch" | "gas_limit_mismatch" | "slippage_limit_mismatch" | "deadline_mismatch" | "nonce_mismatch" | "metadata_mismatch" | "execution_intent_expired" | "invalid_execution_intent_signature" | "execution_intent_payer_mismatch" | "store_conflict" | "policy_denied" | "policy_binding_mismatch" | "simulation_failed" | "gas_cost_exceeded" | "slippage_exceeded" | "execution_uncertain" | "refund_uncertain" | "invalid_state";
+        reason: "execution_failed" | "refund_failed" | "malformed_extension_payload" | "missing_execution_intent" | "missing_intent_requirement" | "missing_settlement" | "unsuccessful_settlement" | "missing_settled_payer" | "missing_settlement_transaction" | "settlement_network_mismatch" | "settlement_amount_mismatch" | "payment_payload_requirements_mismatch" | "payment_requirements_hash_mismatch" | "intent_template_hash_mismatch" | "intent_hash_mismatch" | "quote_mismatch" | "application_mismatch" | "gateway_mismatch" | "chain_mismatch" | "target_mismatch" | "calldata_mismatch" | "value_mismatch" | "recipient_mismatch" | "refund_address_mismatch" | "gas_limit_mismatch" | "slippage_limit_mismatch" | "deadline_mismatch" | "nonce_mismatch" | "metadata_mismatch" | "execution_intent_expired" | "invalid_execution_intent_signature" | "execution_intent_payer_mismatch" | "duplicate_payment" | "store_conflict" | "policy_denied" | "policy_binding_mismatch" | "simulation_failed" | "gas_cost_exceeded" | "slippage_exceeded" | "execution_uncertain" | "refund_uncertain" | "invalid_state";
         retryable: boolean;
     } | undefined;
     claimToken?: string | undefined;
@@ -293,6 +296,9 @@ type IntentStoreRegistrationResult = {
     record: IntentExecutionRecord;
 } | {
     kind: "existing";
+    record: IntentExecutionRecord;
+} | {
+    kind: "duplicate_payment";
     record: IntentExecutionRecord;
 } | {
     kind: "conflict";
@@ -310,7 +316,7 @@ interface IntentExecutionTransitionPatch {
     failure?: IntentExecutionRecord["failure"] | undefined;
     metadata?: Record<string, JsonValue>;
 }
-interface IntentExecutionTransition {
+interface IntentExecutionTransitionBase {
     intentHash: string;
     expectedRevision: number;
     from: IntentExecutionStatus;
@@ -319,6 +325,15 @@ interface IntentExecutionTransition {
     claimToken?: string;
     patch?: IntentExecutionTransitionPatch;
 }
+type IntentExecutionTransition = IntentExecutionTransitionBase & ({
+    paymentNetwork?: never;
+    paymentTransaction?: never;
+} | {
+    /** Selects a duplicate-payment record instead of the primary intent record. */
+    paymentNetwork: string;
+    /** Selects a duplicate-payment record instead of the primary intent record. */
+    paymentTransaction: string;
+});
 type IntentStoreTransitionResult = {
     kind: "updated";
     record: IntentExecutionRecord;
@@ -332,14 +347,18 @@ type IntentStoreTransitionResult = {
 /**
  * Durable adapters must implement each method atomically.
  *
- * `registerPaid` requires unique indexes on intent hash,
- * (application, gateway, quote id), and (payment network, payment transaction).
- * `transition` is a compare-and-swap over revision, status, and claim token.
- * Implementations must also enforce unique execution and refund transactions.
+ * `registerPaid` requires unique indexes on the primary intent hash,
+ * (application, gateway, quote id), and every (payment network, payment
+ * transaction). A second transaction for the same intent must be inserted as a
+ * duplicate-payment refund record by that same atomic operation. `transition`
+ * is a compare-and-swap over payment identity, revision, status, and claim
+ * token. Implementations must also enforce unique execution and refund
+ * transactions across primary and duplicate-payment records.
  */
 interface IntentExecutionStore {
     registerPaid(record: IntentExecutionRecord): Promise<IntentStoreRegistrationResult>;
     get(intentHash: string): Promise<IntentExecutionRecord | undefined>;
+    getPayment(paymentNetwork: string, paymentTransaction: string): Promise<IntentExecutionRecord | undefined>;
     transition(transition: IntentExecutionTransition): Promise<IntentStoreTransitionResult>;
 }
 /**
@@ -348,13 +367,18 @@ interface IntentExecutionStore {
  */
 declare class InMemoryIntentExecutionStore implements IntentExecutionStore {
     private readonly records;
+    private readonly duplicatePayments;
     private readonly quotes;
     private readonly payments;
     private readonly executions;
     private readonly refunds;
     registerPaid(input: IntentExecutionRecord): Promise<IntentStoreRegistrationResult>;
     get(intentHash: string): Promise<IntentExecutionRecord | undefined>;
+    getPayment(paymentNetwork: string, paymentTransaction: string): Promise<IntentExecutionRecord | undefined>;
     transition(input: IntentExecutionTransition): Promise<IntentStoreTransitionResult>;
+    private transitionLocator;
+    private recordForLocator;
+    private storeForLocator;
     private transactionConflict;
 }
 declare function isLegalIntentExecutionTransition(from: IntentExecutionStatus, to: IntentExecutionStatus): boolean;
@@ -449,6 +473,7 @@ declare class IntentStoreConflictError extends Error {
 declare function createIntentExecutor(config: IntentExecutorConfig): {
     store: IntentExecutionStore;
     get(intentHash: string): Promise<IntentExecutionRecord | undefined>;
+    getPayment(paymentNetwork: string, paymentTransaction: string): Promise<IntentExecutionRecord | undefined>;
     verify(input: Omit<PaidIntentVerificationInput, "expectedDomain">): Promise<PaidIntentVerificationResult>;
     /**
      * Runs every settlement-independent check so a resource server can reject
@@ -467,6 +492,8 @@ declare function createIntentExecutor(config: IntentExecutorConfig): {
      */
     execute(input: Omit<PaidIntentVerificationInput, "expectedDomain" | "enforceDeadline">): Promise<IntentExecutionRecord>;
     retryRefund(intentHash: string): Promise<IntentExecutionRecord>;
+    retryPaymentRefund(paymentNetwork: string, paymentTransaction: string): Promise<IntentExecutionRecord>;
+    recoverPayment(paymentNetwork: string, paymentTransaction: string): Promise<IntentExecutionRecord>;
     /**
      * Resume an intent abandoned mid-transition, for example by a process
      * crash, using the claim token persisted on the record. Adapters are only

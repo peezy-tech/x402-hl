@@ -43,6 +43,7 @@ export const DecimalIntegerStringSchema = z
     message: "Value exceeds the uint256 range",
   });
 export const IntentApplicationSchema = z.string().trim().min(1).max(256);
+export const PositiveSafeIntegerSchema = z.number().int().positive().safe();
 
 export type JsonValue =
   | null
@@ -83,7 +84,7 @@ export const HyperEvmExecutionIntentSchema = z.object({
   application: IntentApplicationSchema,
   gateway: NonZeroEvmAddressSchema,
   user: EvmAddressSchema,
-  chainId: z.number().int().positive(),
+  chainId: PositiveSafeIntegerSchema,
   target: EvmAddressSchema,
   callData: HexSchema,
   value: DecimalIntegerStringSchema,
@@ -91,7 +92,7 @@ export const HyperEvmExecutionIntentSchema = z.object({
   refundAddress: NonZeroEvmAddressSchema,
   maxGasCost: DecimalIntegerStringSchema,
   maxSlippageBps: z.number().int().min(0).max(10_000),
-  deadline: z.number().int().positive(),
+  deadline: PositiveSafeIntegerSchema,
   nonce: z.string().min(1).max(256),
   quoteId: z.string().min(1).max(256),
   metadataHash: Bytes32Schema,
@@ -163,7 +164,7 @@ export const IntentPaymentExtraSchema = z.object({
   quoteId: z.string().min(1).max(256),
   applicationHash: Bytes32Schema,
   gateway: EvmAddressSchema,
-  chainId: z.number().int().positive(),
+  chainId: PositiveSafeIntegerSchema,
   target: EvmAddressSchema,
   callDataHash: Bytes32Schema,
   value: DecimalIntegerStringSchema,
@@ -171,7 +172,7 @@ export const IntentPaymentExtraSchema = z.object({
   refundAddress: EvmAddressSchema,
   maxGasCost: DecimalIntegerStringSchema,
   maxSlippageBps: z.number().int().min(0).max(10_000),
-  deadline: z.number().int().positive(),
+  deadline: PositiveSafeIntegerSchema,
   nonceHash: Bytes32Schema,
   metadataHash: Bytes32Schema,
 });
@@ -225,6 +226,7 @@ export const IntentFailureReasonSchema = z.enum([
   "execution_intent_expired",
   "invalid_execution_intent_signature",
   "execution_intent_payer_mismatch",
+  "duplicate_payment",
   "store_conflict",
   "policy_denied",
   "policy_binding_mismatch",
@@ -264,6 +266,7 @@ export const IntentExecutionReceiptSchema = z.object({
   paymentAmount: z.string().min(1),
   paymentPayTo: z.string().min(1),
   paymentTransaction: z.string().min(1),
+  duplicatePayment: z.literal(true).optional(),
   executionNetwork: z.string().optional(),
   executionTransaction: z.string().optional(),
   refundNetwork: z.string().optional(),

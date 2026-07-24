@@ -12,7 +12,6 @@ import { recoverUserFromUserSigned } from "@nktkas/hyperliquid/utils";
 import { getAddress } from "viem";
 import { ExactHyperliquidPayload, ExactHyperliquidPayloadSchema } from "../../types";
 import {
-  HyperliquidNetworkConfigs,
   HYPERLIQUID_WILDCARD_CAIP2,
   SupportedHyperliquidNetworks,
   getExchangeBaseUrl,
@@ -103,14 +102,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     const token = action.token;
     const amount = action.amount;
 
-    const config =
-      HyperliquidNetworkConfigs[
-        requirements.network as keyof typeof HyperliquidNetworkConfigs
-      ];
     if (
-      !config ||
-      action.signatureChainId.toLowerCase() !==
-        config.signatureChainId.toLowerCase() ||
       action.hyperliquidChain !== getHyperliquidChainName(requirements.network)
     ) {
       return {
@@ -284,29 +276,39 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
         };
       }
 
-      await this.submitToExchange(endpoint, exactPayload);
+      let submissionFailed = false;
+      try {
+        await this.submitToExchange(endpoint, exactPayload);
+      } catch {
+        // Exchange errors and lost responses are ambiguous: the action may have
+        // settled before the response failed or a restart replayed its nonce.
+        submissionFailed = true;
+      }
+
       const matchedHash = await this.findConfirmedTransaction(
         infoClient,
         payer,
         exactPayload,
         requirements,
       );
-      if (!matchedHash) {
+      if (matchedHash) {
         return {
-          success: false,
-          errorReason: "hl_transfer_not_confirmed",
-          transaction: matchedHash ?? "",
+          success: true,
+          transaction: matchedHash,
           network: requirements.network,
           payer,
+          amount: requirements.amount,
         };
       }
 
       return {
-        success: true,
-        transaction: matchedHash,
+        success: false,
+        errorReason: submissionFailed
+          ? "hl_exchange_error"
+          : "hl_transfer_not_confirmed",
+        transaction: "",
         network: requirements.network,
         payer,
-        amount: requirements.amount,
       };
     } catch {
       return {
