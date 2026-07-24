@@ -1375,6 +1375,31 @@ test("malformed intent extension returns a typed failure", async t => {
     });
     assertFailure(result, "malformed_extension_payload");
   });
+
+  await t.test("own __proto__ metadata is not stripped before verification", async () => {
+    const metadata = { visible: 1 };
+    const fixture = await makeFixture({ metadata });
+    const result = await verifyPreSettlementExecutionIntent({
+      ...preSettlementInput(fixture),
+      paymentPayload: {
+        ...fixture.paymentPayload,
+        extensions: {
+          [X402_HL_INTENTS_EXTENSION]: {
+            ...fixture.signedIntent,
+            intent: {
+              ...fixture.signedIntent.intent,
+              metadata: JSON.parse(
+                '{"__proto__":{"flag":true},"visible":1}',
+              ),
+            },
+          },
+        },
+      },
+    });
+    assert.equal(result.ok, false);
+    if (result.ok) assert.fail("expected malformed metadata to fail");
+    assert.equal(result.reason, "malformed_extension_payload");
+  });
 });
 
 test("intent metadata mismatching its metadataHash returns a typed failure", async () => {

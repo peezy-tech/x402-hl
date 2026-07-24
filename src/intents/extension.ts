@@ -21,6 +21,10 @@ import {
 // reject every other unsigned envelope field.
 const PaymentSignedExecutionIntentSchema =
   SignedHyperEvmExecutionIntentSchema.extend({
+    // Preserve the raw intent until normalization has compared metadata before
+    // and after recursive schema parsing. Zod records otherwise drop an own
+    // `__proto__` key before that canonicality check can see it.
+    intent: z.unknown(),
     version: z.literal(X402_HL_INTENT_VERSION).optional(),
     required: z.boolean().optional(),
     mode: z.literal("brokered").optional(),
@@ -101,18 +105,21 @@ export function readSignedExecutionIntent(
   }
 
   const parsed = PaymentSignedExecutionIntentSchema.parse(extension);
+  const intent = normalizeExecutionIntent(
+    parsed.intent as HyperEvmExecutionIntentInput,
+  );
   if (
     parsed.intentTemplateHash != null &&
     parsed.intentTemplateHash.toLowerCase() !==
-      hashExecutionIntentTemplate(parsed.intent).toLowerCase()
+      hashExecutionIntentTemplate(intent).toLowerCase()
   ) {
     throw new Error("Intent declaration template hash is invalid");
   }
-  if (parsed.quoteId != null && parsed.quoteId !== parsed.intent.quoteId) {
+  if (parsed.quoteId != null && parsed.quoteId !== intent.quoteId) {
     throw new Error("Intent declaration quote id is invalid");
   }
   return SignedHyperEvmExecutionIntentSchema.parse({
-    intent: parsed.intent,
+    intent,
     paymentRequirementsHash: parsed.paymentRequirementsHash,
     intentHash: parsed.intentHash,
     signature: parsed.signature,
