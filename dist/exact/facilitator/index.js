@@ -4,7 +4,7 @@ import { getAddress, recoverTypedDataAddress } from "viem";
 
 // src/types.ts
 import { z } from "zod";
-var HyperliquidTokenIdRegex = /^[A-Za-z0-9]+:0x[0-9a-fA-F]{32,40}$/;
+var HyperliquidTokenIdRegex = /^[^:]+:0x[0-9a-fA-F]{32,40}$/;
 var Bytes32Regex = /^0x[0-9a-fA-F]{64}$/;
 var EvmAddressRegex = /^0x[0-9a-fA-F]{40}$/;
 var HexIntegerRegex = /^0x[0-9a-fA-F]+$/;
@@ -112,8 +112,9 @@ async function fetchHyperliquidTokenInfo(network, tokenId) {
 // src/exact/facilitator/scheme.ts
 var SETTLEMENT_CACHE_TTL_MS = 5 * 60 * 1e3;
 var MATCH_LOOKAHEAD_MS = 30 * 1e3;
-var MATCH_ATTEMPTS = 5;
-var MATCH_RETRY_DELAY_MS = 500;
+var PRE_SUBMIT_RECONCILIATION_ATTEMPTS = 5;
+var MATCH_RETRY_DELAY_MS = 1e3;
+var POST_SUBMIT_CONFIRMATION_TIMEOUT_MS = 30 * 1e3;
 var MAX_CLOCK_SKEW_MS = 30 * 1e3;
 var MATCH_LOOKBACK_MS = MAX_CLOCK_SKEW_MS;
 var MATCH_WINDOW_LATE_GRACE_MS = MAX_CLOCK_SKEW_MS + MATCH_LOOKAHEAD_MS;
@@ -275,7 +276,7 @@ var ExactHyperliquidScheme = class {
         payer,
         exactPayload,
         requirements,
-        ttlValid ? 1 : MATCH_ATTEMPTS
+        ttlValid ? 1 : PRE_SUBMIT_RECONCILIATION_ATTEMPTS
       );
       if (existingHash) {
         return {
@@ -286,7 +287,10 @@ var ExactHyperliquidScheme = class {
           amount: requirements.amount
         };
       }
-      if (!ttlValid) {
+      if (!this.validateTtl(
+        exactPayload.action.nonce,
+        requirements.maxTimeoutSeconds
+      )) {
         return {
           success: false,
           errorReason: "payment_expired",
@@ -389,7 +393,7 @@ var ExactHyperliquidScheme = class {
     }
     return false;
   }
-  async findConfirmedTransaction(client, payer, payload, requirements, attempts = MATCH_ATTEMPTS) {
+  async findConfirmedTransaction(client, payer, payload, requirements, attempts) {
     const action = payload.action;
     const destination = typeof action.destination === "string" ? action.destination : void 0;
     const token = typeof action.token === "string" ? action.token : void 0;
@@ -397,7 +401,10 @@ var ExactHyperliquidScheme = class {
     if (!destination || !token || !amount) return void 0;
     const decimals = await this.resolveDecimals(requirements);
     const startTime = Math.max(0, payload.nonce - MATCH_LOOKBACK_MS);
-    for (let attempt = 0; attempt < attempts; attempt++) {
+    const deadline = attempts === void 0 ? Date.now() + POST_SUBMIT_CONFIRMATION_TIMEOUT_MS : void 0;
+    let attempt = 0;
+    while (attempts === void 0 ? attempt === 0 || Date.now() < deadline : attempt < attempts) {
+      attempt += 1;
       try {
         const updates = await client.userNonFundingLedgerUpdates({
           user: payer,
@@ -427,9 +434,16 @@ var ExactHyperliquidScheme = class {
         }
       } catch {
       }
-      if (attempt < attempts - 1) {
+      if (attempts !== void 0) {
+        if (attempt >= attempts) break;
         await new Promise((r) => setTimeout(r, MATCH_RETRY_DELAY_MS));
+        continue;
       }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await new Promise(
+        (r) => setTimeout(r, Math.min(MATCH_RETRY_DELAY_MS, remaining))
+      );
     }
     return void 0;
   }

@@ -10,6 +10,7 @@ import {
   ExecutionIntentDomainSchema,
   HyperEvmExecutionIntent,
   IntentFailureReason,
+  SignedHyperEvmExecutionIntent,
   SignedHyperEvmExecutionIntentSchema,
 } from "../types";
 import { hashPaymentRequirements, verifyIntentPaymentExtra } from "../payment";
@@ -110,16 +111,15 @@ export async function verifyPreSettlementExecutionIntent(
     );
   }
 
-  const parsedSignedIntent = SignedHyperEvmExecutionIntentSchema.safeParse(
-    rawSignedIntent,
-  );
-  if (!parsedSignedIntent.success) {
+  let signedIntent: SignedHyperEvmExecutionIntent;
+  try {
+    signedIntent = SignedHyperEvmExecutionIntentSchema.parse(rawSignedIntent);
+  } catch {
     return failure(
       "malformed_extension_payload",
       "Payment payload contains a malformed x402-hl execution intent",
     );
   }
-  const signedIntent = parsedSignedIntent.data;
   const intent = signedIntent.intent;
 
   // Untrusted intents must fail closed rather than throw: normalization

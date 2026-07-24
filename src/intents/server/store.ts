@@ -6,6 +6,7 @@ import {
   IntentExecutionStatus,
   JsonValue,
 } from "../types";
+import { canonicalizeTransactionIdentifier } from "./identifiers";
 
 export const IntentExecutionRecordSchema = IntentExecutionReceiptSchema.extend({
   intent: HyperEvmExecutionIntentSchema,
@@ -83,7 +84,9 @@ export type IntentStoreTransitionResult =
  * duplicate-payment refund record by that same atomic operation. `transition`
  * is a compare-and-swap over payment identity, revision, status, and claim
  * token. Implementations must also enforce unique execution and refund
- * transactions across primary and duplicate-payment records.
+ * transactions across primary and duplicate-payment records. Transaction
+ * identifiers must be canonicalized with surrounding whitespace removed and
+ * ASCII case folded before indexing or persistence.
  */
 export interface IntentExecutionStore {
   registerPaid(record: IntentExecutionRecord): Promise<IntentStoreRegistrationResult>;
@@ -116,7 +119,18 @@ export class InMemoryIntentExecutionStore implements IntentExecutionStore {
   async registerPaid(
     input: IntentExecutionRecord,
   ): Promise<IntentStoreRegistrationResult> {
-    const record = IntentExecutionRecordSchema.parse(input);
+    const record = IntentExecutionRecordSchema.parse({
+      ...input,
+      paymentTransaction: canonicalizeTransactionIdentifier(
+        input.paymentTransaction,
+      ),
+      executionTransaction: input.executionTransaction
+        ? canonicalizeTransactionIdentifier(input.executionTransaction)
+        : undefined,
+      refundTransaction: input.refundTransaction
+        ? canonicalizeTransactionIdentifier(input.refundTransaction)
+        : undefined,
+    });
     const intentKey = normalizeHash(record.intentHash);
     const paymentKey = transactionIndex(
       record.paymentNetwork,
@@ -243,9 +257,16 @@ export class InMemoryIntentExecutionStore implements IntentExecutionStore {
       };
     }
 
+    const patch = input.patch ?? {};
     const next = IntentExecutionRecordSchema.parse({
       ...current,
-      ...(input.patch ?? {}),
+      ...patch,
+      executionTransaction: patch.executionTransaction
+        ? canonicalizeTransactionIdentifier(patch.executionTransaction)
+        : current.executionTransaction,
+      refundTransaction: patch.refundTransaction
+        ? canonicalizeTransactionIdentifier(patch.refundTransaction)
+        : current.refundTransaction,
       status: input.to,
       revision: current.revision + 1,
       updatedAt: new Date().toISOString(),
@@ -394,7 +415,6 @@ function sameIntentRegistration(
     left.quoteId === right.quoteId &&
     left.paymentRequirementsHash.toLowerCase() ===
       right.paymentRequirementsHash.toLowerCase() &&
-    left.payer.toLowerCase() === right.payer.toLowerCase() &&
     left.paymentScheme === right.paymentScheme &&
     left.paymentNetwork === right.paymentNetwork &&
     left.paymentAsset === right.paymentAsset &&
@@ -409,8 +429,9 @@ function samePaymentRegistration(
 ): boolean {
   return (
     sameIntentRegistration(left, right) &&
-    left.paymentTransaction.toLowerCase() ===
-      right.paymentTransaction.toLowerCase()
+    left.payer.toLowerCase() === right.payer.toLowerCase() &&
+    canonicalizeTransactionIdentifier(left.paymentTransaction) ===
+      canonicalizeTransactionIdentifier(right.paymentTransaction)
   );
 }
 
@@ -427,7 +448,7 @@ function quoteIndex(record: IntentExecutionRecord): string {
 }
 
 function transactionIndex(network: string, transaction: string): string {
-  return `${network}\u0000${transaction.toLowerCase()}`;
+  return `${network}\u0000${canonicalizeTransactionIdentifier(transaction)}`;
 }
 
 function locatorKey(locator: RecordLocator): string {

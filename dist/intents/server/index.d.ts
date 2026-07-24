@@ -1,5 +1,5 @@
 import { HyperEvmExecutionIntentInput, HyperEvmExecutionIntent, IntentDeclaration, IntentPaymentExtra, ExecutionIntentDomain, IntentFailureReason, IntentExecutionReceipt, IntentExecutionStatus, JsonValue } from '../index.js';
-export { Bytes32Schema, CanonicalPaymentRequirements, DecimalIntegerStringSchema, EvmAddressSchema, ExecutionIntentDomainSchema, ExecutionIntentPaymentBinding, HexSchema, HyperEvmExecutionIntentSchema, IntentApplicationSchema, IntentBindingFailure, IntentBindingResult, IntentDeclarationOptions, IntentDeclarationSchema, IntentExecutionMode, IntentExecutionModeSchema, IntentExecutionReceiptSchema, IntentExecutionStatusSchema, IntentFailure, IntentFailureReasonSchema, IntentFailureSchema, IntentPaymentExtraSchema, IntentSigner, JsonRecordSchema, JsonValueSchema, NonZeroEvmAddressSchema, PositiveSafeIntegerSchema, SignExecutionIntentOptions, SignedHyperEvmExecutionIntent, SignedHyperEvmExecutionIntentSchema, TERMINAL_INTENT_EXECUTION_STATUSES, UINT256_MAX, X402_HL_INTENTS_EXTENSION, X402_HL_INTENTS_EXTRA_KEY, X402_HL_INTENT_DOMAIN_NAME, X402_HL_INTENT_DOMAIN_VERSION, X402_HL_INTENT_PRIMARY_TYPE, X402_HL_INTENT_TYPES, X402_HL_INTENT_VERSION, ZERO_ADDRESS, ZERO_BYTES32, attachSignedExecutionIntent, buildExecutionIntentTypedData, canonicalizePaymentRequirements, createIntentDeclaration, createIntentPaymentExtra, getIntentSignerAddress, hashExecutionIntent, hashExecutionIntentTemplate, hashIntentMetadata, hashIntentText, hashPaymentRequirements, isTerminalIntentExecutionStatus, normalizeBytes32, normalizeExecutionIntent, readIntentDeclaration, readIntentPaymentExtra, readSignedExecutionIntent, recoverExecutionIntentSigner, signExecutionIntent, stableJson, verifyExecutionIntentSignature, verifyIntentPaymentExtra } from '../index.js';
+export { Bytes32Schema, CanonicalPaymentRequirements, DecimalIntegerStringSchema, EvmAddressSchema, ExecutionIntentDomainSchema, ExecutionIntentPaymentBinding, HexSchema, HyperEvmExecutionIntentSchema, IntentApplicationSchema, IntentBindingFailure, IntentBindingResult, IntentDeclarationOptions, IntentDeclarationSchema, IntentExecutionMode, IntentExecutionModeSchema, IntentExecutionReceiptSchema, IntentExecutionStatusSchema, IntentFailure, IntentFailureReasonSchema, IntentFailureSchema, IntentPaymentExtraSchema, IntentSigner, JsonRecordSchema, JsonValueSchema, MAX_JSON_NESTING_DEPTH, NonZeroEvmAddressSchema, PositiveSafeIntegerSchema, SignExecutionIntentOptions, SignedHyperEvmExecutionIntent, SignedHyperEvmExecutionIntentSchema, TERMINAL_INTENT_EXECUTION_STATUSES, UINT256_MAX, X402_HL_INTENTS_EXTENSION, X402_HL_INTENTS_EXTRA_KEY, X402_HL_INTENT_DOMAIN_NAME, X402_HL_INTENT_DOMAIN_VERSION, X402_HL_INTENT_PRIMARY_TYPE, X402_HL_INTENT_TYPES, X402_HL_INTENT_VERSION, ZERO_ADDRESS, ZERO_BYTES32, attachSignedExecutionIntent, buildExecutionIntentTypedData, canonicalizePaymentRequirements, createIntentDeclaration, createIntentPaymentExtra, getIntentSignerAddress, hashExecutionIntent, hashExecutionIntentTemplate, hashIntentMetadata, hashIntentText, hashPaymentRequirements, isTerminalIntentExecutionStatus, isWellFormedUnicode, normalizeBytes32, normalizeExecutionIntent, readIntentDeclaration, readIntentPaymentExtra, readSignedExecutionIntent, recoverExecutionIntentSigner, signExecutionIntent, stableJson, verifyExecutionIntentSignature, verifyIntentPaymentExtra } from '../index.js';
 import { Price, SettleResponse, PaymentPayload, PaymentRequirements } from '@x402/core/types';
 import { RouteConfig } from '@x402/core/server';
 import { Hex, Address } from 'viem';
@@ -92,8 +92,8 @@ declare const IntentExecutionRecordSchema: zod.ZodObject<{
     intentHash: zod.ZodString;
     intentTemplateHash: zod.ZodString;
     paymentRequirementsHash: zod.ZodString;
-    quoteId: zod.ZodString;
-    application: zod.ZodString;
+    quoteId: zod.ZodEffects<zod.ZodString, string, string>;
+    application: zod.ZodEffects<zod.ZodString, string, string>;
     gateway: zod.ZodString;
     payer: zod.ZodString;
     paymentScheme: zod.ZodString;
@@ -129,7 +129,7 @@ declare const IntentExecutionRecordSchema: zod.ZodObject<{
 } & {
     intent: zod.ZodObject<{
         version: zod.ZodLiteral<2>;
-        application: zod.ZodString;
+        application: zod.ZodEffects<zod.ZodString, string, string>;
         gateway: zod.ZodEffects<zod.ZodString, string, string>;
         user: zod.ZodString;
         chainId: zod.ZodNumber;
@@ -141,8 +141,8 @@ declare const IntentExecutionRecordSchema: zod.ZodObject<{
         maxGasCost: zod.ZodEffects<zod.ZodString, string, string>;
         maxSlippageBps: zod.ZodNumber;
         deadline: zod.ZodNumber;
-        nonce: zod.ZodString;
-        quoteId: zod.ZodString;
+        nonce: zod.ZodEffects<zod.ZodString, string, string>;
+        quoteId: zod.ZodEffects<zod.ZodString, string, string>;
         metadataHash: zod.ZodString;
         metadata: zod.ZodOptional<zod.ZodRecord<zod.ZodString, zod.ZodType<JsonValue, zod.ZodTypeDef, JsonValue>>>;
     }, "strip", zod.ZodTypeAny, {
@@ -353,7 +353,9 @@ type IntentStoreTransitionResult = {
  * duplicate-payment refund record by that same atomic operation. `transition`
  * is a compare-and-swap over payment identity, revision, status, and claim
  * token. Implementations must also enforce unique execution and refund
- * transactions across primary and duplicate-payment records.
+ * transactions across primary and duplicate-payment records. Transaction
+ * identifiers must be canonicalized with surrounding whitespace removed and
+ * ASCII case folded before indexing or persistence.
  */
 interface IntentExecutionStore {
     registerPaid(record: IntentExecutionRecord): Promise<IntentStoreRegistrationResult>;

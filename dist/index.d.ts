@@ -103,7 +103,7 @@ declare const ExactHyperliquidPayloadSchema: z.ZodObject<{
     user: string;
 }>;
 type ExactHyperliquidPayload = z.infer<typeof ExactHyperliquidPayloadSchema>;
-declare const HyperliquidErrorReasons: readonly ["invalid_x402_version", "unsupported_scheme", "network_mismatch", "invalid_exact_hl_payload", "invalid_exact_hl_payload_signature", "invalid_exact_hl_payload_signer_mismatch", "invalid_exact_hl_payload_nonce_mismatch", "invalid_exact_hl_payload_chain_mismatch", "invalid_exact_hl_payload_asset_mismatch", "invalid_exact_hl_payload_recipient_mismatch", "invalid_exact_hl_payload_amount_mismatch", "invalid_exact_hl_network", "hl_exchange_error", "hl_tx_not_found", "hl_tx_unconfirmed", "hl_transfer_not_confirmed"];
+declare const HyperliquidErrorReasons: readonly ["invalid_x402_version", "unsupported_scheme", "network_mismatch", "invalid_exact_hl_payload", "invalid_exact_hl_payload_signature", "invalid_exact_hl_payload_signer_mismatch", "invalid_exact_hl_payload_nonce_mismatch", "invalid_exact_hl_payload_chain_mismatch", "invalid_exact_hl_payload_asset_mismatch", "invalid_exact_hl_payload_recipient_mismatch", "invalid_exact_hl_payload_amount_mismatch", "invalid_exact_hl_network", "payment_expired", "hl_exchange_error", "hl_tx_not_found", "hl_tx_unconfirmed", "hl_transfer_not_confirmed"];
 
 declare function assertHyperliquidNetwork(network: string): asserts network is HyperliquidNetwork;
 declare function getHyperliquidChainName(network: string): HyperliquidChainName;

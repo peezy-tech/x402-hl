@@ -1,3 +1,5 @@
+import { MAX_JSON_NESTING_DEPTH } from "./types";
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== "object") return false;
   const prototype = Object.getPrototypeOf(value);
@@ -13,10 +15,14 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * cyclic value from being signed differently than it is displayed.
  */
 export function stableJson(value: unknown): string {
-  return serializeJson(value, new Set<object>());
+  return serializeJson(value, new Set<object>(), 0);
 }
 
-function serializeJson(value: unknown, ancestors: Set<object>): string {
+function serializeJson(
+  value: unknown,
+  ancestors: Set<object>,
+  depth: number,
+): string {
   if (value === null || typeof value === "boolean" || typeof value === "string") {
     return JSON.stringify(value);
   }
@@ -31,6 +37,11 @@ function serializeJson(value: unknown, ancestors: Set<object>): string {
   if (typeof value !== "object") {
     throw new TypeError(`Value of type ${typeof value} is not valid JSON`);
   }
+  if (depth >= MAX_JSON_NESTING_DEPTH) {
+    throw new TypeError(
+      `JSON nesting exceeds the maximum depth of ${MAX_JSON_NESTING_DEPTH}`,
+    );
+  }
 
   if (ancestors.has(value)) {
     throw new TypeError("Cyclic values are not valid JSON");
@@ -44,7 +55,7 @@ function serializeJson(value: unknown, ancestors: Set<object>): string {
           throw new TypeError("Sparse arrays are not valid JSON");
         }
       }
-      return `[${value.map(item => serializeJson(item, ancestors)).join(",")}]`;
+      return `[${value.map(item => serializeJson(item, ancestors, depth + 1)).join(",")}]`;
     }
 
     if (!isPlainObject(value)) {
@@ -60,7 +71,7 @@ function serializeJson(value: unknown, ancestors: Set<object>): string {
         if (entryValue === undefined) {
           throw new TypeError(`JSON object property ${key} is undefined`);
         }
-        return `${JSON.stringify(key)}:${serializeJson(entryValue, ancestors)}`;
+        return `${JSON.stringify(key)}:${serializeJson(entryValue, ancestors, depth + 1)}`;
       })
       .join(",")}}`;
   } finally {

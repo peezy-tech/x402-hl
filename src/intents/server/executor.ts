@@ -6,6 +6,7 @@ import {
   ExecutionIntentDomain,
   IntentFailure,
   IntentFailureReason,
+  JsonRecordSchema,
   JsonValue,
   X402_HL_INTENT_VERSION,
   isTerminalIntentExecutionStatus,
@@ -21,6 +22,7 @@ import {
   verifyPaidExecutionIntent,
   verifyPreSettlementExecutionIntent,
 } from "./verification";
+import { canonicalizeTransactionIdentifier } from "./identifiers";
 import type {
   IntentExecutionRecord,
   IntentExecutionStore,
@@ -410,6 +412,10 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
         );
       }
 
+      const executionTransaction = canonicalizeTransactionIdentifier(
+        execution.transaction,
+      );
+      const executionMetadata = parseAdapterMetadata(execution.metadata);
       const executed = await config.store.transition({
         intentHash: record.intentHash,
         expectedRevision: record.revision,
@@ -419,9 +425,9 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
         patch: {
           claimToken: undefined,
           executionNetwork: execution.network,
-          executionTransaction: execution.transaction,
+          executionTransaction,
           failure: undefined,
-          metadata: execution.metadata,
+          metadata: executionMetadata,
         },
       });
       if (executed.kind === "updated") return executed.record;
@@ -435,7 +441,8 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
         executed,
         {
           executionNetwork: execution.network,
-          executionTransaction: execution.transaction,
+          executionTransaction,
+          metadata: executionMetadata,
         },
       );
     },
@@ -645,7 +652,9 @@ function createPaidRecord(
     paymentAsset: input.paymentRequirements.asset,
     paymentAmount: input.paymentRequirements.amount,
     paymentPayTo: input.paymentRequirements.payTo,
-    paymentTransaction: verified.settlement.transaction,
+    paymentTransaction: canonicalizeTransactionIdentifier(
+      verified.settlement.transaction,
+    ),
     executionAttempts: 0,
     refundAttempts: 0,
     createdAt: now,
@@ -870,6 +879,10 @@ async function runRefund(
         ),
       );
     }
+    const refundTransaction = canonicalizeTransactionIdentifier(
+      refund.transaction,
+    );
+    const refundMetadata = parseAdapterMetadata(refund.metadata);
     if (refund.network !== record.paymentNetwork) {
       return markManualIntervention(
         config.store,
@@ -882,7 +895,8 @@ async function runRefund(
         ),
         {
           refundNetwork: refund.network,
-          refundTransaction: refund.transaction,
+          refundTransaction,
+          metadata: refundMetadata,
         },
       );
     }
@@ -897,9 +911,9 @@ async function runRefund(
         patch: {
           claimToken: undefined,
           refundNetwork: refund.network,
-          refundTransaction: refund.transaction,
+          refundTransaction,
           failure: undefined,
-          metadata: refund.metadata,
+          metadata: refundMetadata,
         },
       }),
     );
@@ -913,7 +927,8 @@ async function runRefund(
       refunded,
       {
         refundNetwork: refund.network,
-        refundTransaction: refund.transaction,
+        refundTransaction,
+        metadata: refundMetadata,
       },
     );
   }
@@ -1042,8 +1057,20 @@ function paymentTransition(
 
 function refundIdempotencyKey(record: IntentExecutionRecord): string {
   return record.duplicatePayment
-    ? `${record.intentHash}:refund:${record.paymentNetwork}:${record.paymentTransaction.toLowerCase()}`
+    ? `${record.intentHash}:refund:${record.paymentNetwork}:${canonicalizeTransactionIdentifier(record.paymentTransaction)}`
     : `${record.intentHash}:refund`;
+}
+
+function parseAdapterMetadata(
+  metadata: unknown,
+): Record<string, JsonValue> | undefined {
+  if (metadata === undefined) return undefined;
+  try {
+    const parsed = JsonRecordSchema.safeParse(metadata);
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function safeFailure(

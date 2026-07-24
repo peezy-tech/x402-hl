@@ -254,7 +254,7 @@ export const POSTGRES_INTENT_STORE_DDL = `
 CREATE TABLE x402_intent_payment (
   payment_network text NOT NULL,
   payment_transaction text NOT NULL
-    CHECK (payment_transaction = lower(payment_transaction)),
+    CHECK (payment_transaction = lower(btrim(payment_transaction))),
   intent_hash text NOT NULL CHECK (intent_hash = lower(intent_hash)),
   primary_payment boolean NOT NULL,
   application text NOT NULL,
@@ -262,10 +262,10 @@ CREATE TABLE x402_intent_payment (
   quote_id text NOT NULL,
   execution_network text,
   execution_transaction text
-    CHECK (execution_transaction IS NULL OR execution_transaction = lower(execution_transaction)),
+    CHECK (execution_transaction IS NULL OR execution_transaction = lower(btrim(execution_transaction))),
   refund_network text,
   refund_transaction text
-    CHECK (refund_transaction IS NULL OR refund_transaction = lower(refund_transaction)),
+    CHECK (refund_transaction IS NULL OR refund_transaction = lower(btrim(refund_transaction))),
   revision integer NOT NULL,
   status text NOT NULL,
   claim_token text,
@@ -286,13 +286,63 @@ CREATE UNIQUE INDEX x402_intent_refund_tx
   WHERE refund_transaction IS NOT NULL;
 `;
 
+function canonicalTransaction(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function canonicalRecord(
+  input: IntentExecutionRecord,
+): IntentExecutionRecord {
+  return IntentExecutionRecordSchema.parse({
+    ...input,
+    paymentTransaction: canonicalTransaction(input.paymentTransaction),
+    executionTransaction: input.executionTransaction
+      ? canonicalTransaction(input.executionTransaction)
+      : undefined,
+    refundTransaction: input.refundTransaction
+      ? canonicalTransaction(input.refundTransaction)
+      : undefined,
+  });
+}
+
+function canonicalTransition(
+  input: IntentExecutionTransition,
+): IntentExecutionTransition {
+  const patch = input.patch
+    ? {
+        ...input.patch,
+        ...(input.patch.executionTransaction
+          ? {
+              executionTransaction: canonicalTransaction(
+                input.patch.executionTransaction,
+              ),
+            }
+          : {}),
+        ...(input.patch.refundTransaction
+          ? {
+              refundTransaction: canonicalTransaction(
+                input.patch.refundTransaction,
+              ),
+            }
+          : {}),
+      }
+    : undefined;
+  return "paymentTransaction" in input && input.paymentTransaction !== undefined
+    ? {
+        ...input,
+        paymentTransaction: canonicalTransaction(input.paymentTransaction),
+        patch,
+      }
+    : { ...input, patch };
+}
+
 export class PostgresIntentExecutionStore implements IntentExecutionStore {
   constructor(private readonly database: PostgresIntentDatabase) {}
 
   async registerPaid(
     input: IntentExecutionRecord,
   ): Promise<IntentStoreRegistrationResult> {
-    const record = IntentExecutionRecordSchema.parse(input);
+    const record = canonicalRecord(input);
     return this.database.transaction(transaction =>
       transaction.insertPaid(record),
     );
@@ -309,7 +359,7 @@ export class PostgresIntentExecutionStore implements IntentExecutionStore {
   ): Promise<IntentExecutionRecord | undefined> {
     const row = await this.database.findByPayment(
       paymentNetwork,
-      paymentTransaction.toLowerCase(),
+      paymentTransaction.trim().toLowerCase(),
     );
     return row == null ? undefined : IntentExecutionRecordSchema.parse(row);
   }
@@ -318,7 +368,7 @@ export class PostgresIntentExecutionStore implements IntentExecutionStore {
     transition: IntentExecutionTransition,
   ): Promise<IntentStoreTransitionResult> {
     return this.database.transaction(transaction =>
-      transaction.compareAndSwap(transition),
+      transaction.compareAndSwap(canonicalTransition(transition)),
     );
   }
 }

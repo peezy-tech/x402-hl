@@ -261,12 +261,18 @@ signature. Never replace settlement evidence with a successful facilitator
 The store is the replay and concurrency boundary. Store every settled payment,
 not only one row per intent: one payment is the primary execution funding row,
 and later payments for the same signed intent are refund-only rows. A production
-table needs at least these keys and indexes (transaction identifiers should be
-canonicalized to lowercase on write):
+table needs at least these keys and indexes (transaction identifiers should have
+surrounding whitespace removed and be canonicalized to lowercase on write):
 
 ```sql
 ALTER TABLE intent_payments
-  ADD PRIMARY KEY (payment_network, payment_transaction);
+  ADD PRIMARY KEY (payment_network, payment_transaction),
+  ADD CONSTRAINT payment_transaction_canonical
+    CHECK (payment_transaction = lower(btrim(payment_transaction))),
+  ADD CONSTRAINT execution_transaction_canonical
+    CHECK (execution_transaction IS NULL OR execution_transaction = lower(btrim(execution_transaction))),
+  ADD CONSTRAINT refund_transaction_canonical
+    CHECK (refund_transaction IS NULL OR refund_transaction = lower(btrim(refund_transaction)));
 CREATE UNIQUE INDEX intents_primary_intent_uq
   ON intent_payments (intent_hash)
   WHERE primary_payment;
@@ -290,16 +296,52 @@ import type {
   IntentExecutionTransition,
 } from "x402-hl/intents/server";
 
+const canonicalTransaction = (value: string) => value.trim().toLowerCase();
+
+function canonicalTransition(input: IntentExecutionTransition) {
+  return {
+    ...input,
+    ...(input.paymentTransaction
+      ? { paymentTransaction: canonicalTransaction(input.paymentTransaction) }
+      : {}),
+    patch: input.patch && {
+      ...input.patch,
+      ...(input.patch.executionTransaction
+        ? {
+            executionTransaction: canonicalTransaction(
+              input.patch.executionTransaction,
+            ),
+          }
+        : {}),
+      ...(input.patch.refundTransaction
+        ? {
+            refundTransaction: canonicalTransaction(input.patch.refundTransaction),
+          }
+        : {}),
+    },
+  } as IntentExecutionTransition;
+}
+
 class PostgresIntentStore implements IntentExecutionStore {
   constructor(private readonly db: Database) {}
 
   async registerPaid(record: IntentExecutionRecord) {
+    const canonicalRecord = {
+      ...record,
+      paymentTransaction: canonicalTransaction(record.paymentTransaction),
+      executionTransaction: record.executionTransaction
+        ? canonicalTransaction(record.executionTransaction)
+        : undefined,
+      refundTransaction: record.refundTransaction
+        ? canonicalTransaction(record.refundTransaction)
+        : undefined,
+    };
     return this.db.transaction(async tx => {
       // INSERT the primary payment, or atomically insert a refund-only
       // duplicate-payment row when the same intent already has a different
       // settled transaction. Never return a conflict without retaining that
       // additional payment.
-      return atomicRegisterPaid(tx, record);
+      return atomicRegisterPaid(tx, canonicalRecord);
     });
   }
 
@@ -311,7 +353,7 @@ class PostgresIntentStore implements IntentExecutionStore {
     return loadPaymentRecord(
       this.db,
       paymentNetwork,
-      paymentTransaction.toLowerCase(),
+      paymentTransaction.trim().toLowerCase(),
     );
   }
 
@@ -320,7 +362,7 @@ class PostgresIntentStore implements IntentExecutionStore {
       // One UPDATE must match the selected payment row + expected revision +
       // from status and, when present, the claim token. Increment revision in
       // that UPDATE, validate the legal state transition, and return the row.
-      return compareAndSwapIntent(tx, input);
+      return compareAndSwapIntent(tx, canonicalTransition(input));
     });
   }
 }

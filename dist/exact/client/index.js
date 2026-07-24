@@ -7,7 +7,7 @@ import { arbitrum as arbitrum2 } from "viem/chains";
 
 // src/types.ts
 import { z } from "zod";
-var HyperliquidTokenIdRegex = /^[A-Za-z0-9]+:0x[0-9a-fA-F]{32,40}$/;
+var HyperliquidTokenIdRegex = /^[^:]+:0x[0-9a-fA-F]{32,40}$/;
 var Bytes32Regex = /^0x[0-9a-fA-F]{64}$/;
 var EvmAddressRegex = /^0x[0-9a-fA-F]{40}$/;
 var HexIntegerRegex = /^0x[0-9a-fA-F]+$/;

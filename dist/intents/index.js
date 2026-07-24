@@ -11,6 +11,23 @@ var HexRegex = /^0x(?:[0-9a-fA-F]{2})*$/;
 var Bytes32Regex = /^0x[0-9a-fA-F]{64}$/;
 var EvmAddressRegex = /^0x[0-9a-fA-F]{40}$/;
 var DecimalIntegerRegex = /^(0|[1-9]\d*)$/;
+function isWellFormedUnicode(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 55296 && codeUnit <= 56319) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 56320 && next <= 57343)) return false;
+      index += 1;
+    } else if (codeUnit >= 56320 && codeUnit <= 57343) {
+      return false;
+    }
+  }
+  return true;
+}
+var WellFormedTextOptions = {
+  message: "Text must contain well-formed Unicode"
+};
+var IntentTextIdentifierSchema = z.string().min(1).max(256).refine(isWellFormedUnicode, WellFormedTextOptions);
 var HexSchema = z.string().regex(HexRegex);
 var Bytes32Schema = z.string().regex(Bytes32Regex);
 var EvmAddressSchema = z.string().regex(EvmAddressRegex);
@@ -19,22 +36,29 @@ var NonZeroEvmAddressSchema = EvmAddressSchema.refine(
   "Address must not be the zero address"
 );
 var UINT256_MAX = (1n << 256n) - 1n;
-var DecimalIntegerStringSchema = z.string().max(78).regex(DecimalIntegerRegex).refine((value) => BigInt(value) <= UINT256_MAX, {
-  message: "Value exceeds the uint256 range"
-});
-var IntentApplicationSchema = z.string().trim().min(1).max(256);
+var UINT256_MAX_DECIMAL = UINT256_MAX.toString();
+var DecimalIntegerStringSchema = z.string().max(UINT256_MAX_DECIMAL.length).regex(DecimalIntegerRegex).refine(
+  (value) => !DecimalIntegerRegex.test(value) || value.length !== UINT256_MAX_DECIMAL.length || value <= UINT256_MAX_DECIMAL,
+  { message: "Value exceeds the uint256 range" }
+);
+var IntentApplicationSchema = z.string().trim().min(1).max(256).refine(isWellFormedUnicode, WellFormedTextOptions);
 var PositiveSafeIntegerSchema = z.number().int().positive().safe();
-var JsonValueSchema = z.lazy(
-  () => z.union([
+var MAX_JSON_NESTING_DEPTH = 64;
+function createJsonValueSchema(remainingDepth) {
+  const scalar = z.union([
     z.null(),
     z.boolean(),
     z.number().finite(),
-    z.string(),
-    z.array(JsonValueSchema),
-    z.record(JsonValueSchema)
-  ])
+    z.string()
+  ]);
+  if (remainingDepth === 0) return scalar;
+  const child = createJsonValueSchema(remainingDepth - 1);
+  return z.union([scalar, z.array(child), z.record(child)]);
+}
+var JsonValueSchema = createJsonValueSchema(MAX_JSON_NESTING_DEPTH);
+var JsonRecordSchema = z.record(
+  createJsonValueSchema(MAX_JSON_NESTING_DEPTH - 1)
 );
-var JsonRecordSchema = z.record(JsonValueSchema);
 var IntentExecutionModeSchema = z.literal("brokered");
 var ExecutionIntentDomainSchema = z.object({
   application: IntentApplicationSchema,
@@ -54,8 +78,8 @@ var HyperEvmExecutionIntentSchema = z.object({
   maxGasCost: DecimalIntegerStringSchema,
   maxSlippageBps: z.number().int().min(0).max(1e4),
   deadline: PositiveSafeIntegerSchema,
-  nonce: z.string().min(1).max(256),
-  quoteId: z.string().min(1).max(256),
+  nonce: IntentTextIdentifierSchema,
+  quoteId: IntentTextIdentifierSchema,
   metadataHash: Bytes32Schema,
   metadata: JsonRecordSchema.optional()
 });
@@ -72,13 +96,13 @@ var IntentDeclarationSchema = z.object({
   mode: IntentExecutionModeSchema,
   intent: HyperEvmExecutionIntentSchema,
   intentTemplateHash: Bytes32Schema,
-  quoteId: z.string().min(1).max(256)
+  quoteId: IntentTextIdentifierSchema
 });
 var IntentPaymentExtraSchema = z.object({
   version: z.literal(X402_HL_INTENT_VERSION),
   mode: IntentExecutionModeSchema,
   intentTemplateHash: Bytes32Schema,
-  quoteId: z.string().min(1).max(256),
+  quoteId: IntentTextIdentifierSchema,
   applicationHash: Bytes32Schema,
   gateway: EvmAddressSchema,
   chainId: PositiveSafeIntegerSchema,
@@ -162,7 +186,7 @@ var IntentExecutionReceiptSchema = z.object({
   intentHash: Bytes32Schema,
   intentTemplateHash: Bytes32Schema,
   paymentRequirementsHash: Bytes32Schema,
-  quoteId: z.string().min(1).max(256),
+  quoteId: IntentTextIdentifierSchema,
   application: IntentApplicationSchema,
   gateway: EvmAddressSchema,
   payer: EvmAddressSchema,
@@ -201,9 +225,9 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 function stableJson(value) {
-  return serializeJson(value, /* @__PURE__ */ new Set());
+  return serializeJson(value, /* @__PURE__ */ new Set(), 0);
 }
-function serializeJson(value, ancestors) {
+function serializeJson(value, ancestors, depth) {
   if (value === null || typeof value === "boolean" || typeof value === "string") {
     return JSON.stringify(value);
   }
@@ -216,6 +240,11 @@ function serializeJson(value, ancestors) {
   if (typeof value !== "object") {
     throw new TypeError(`Value of type ${typeof value} is not valid JSON`);
   }
+  if (depth >= MAX_JSON_NESTING_DEPTH) {
+    throw new TypeError(
+      `JSON nesting exceeds the maximum depth of ${MAX_JSON_NESTING_DEPTH}`
+    );
+  }
   if (ancestors.has(value)) {
     throw new TypeError("Cyclic values are not valid JSON");
   }
@@ -227,7 +256,7 @@ function serializeJson(value, ancestors) {
           throw new TypeError("Sparse arrays are not valid JSON");
         }
       }
-      return `[${value.map((item) => serializeJson(item, ancestors)).join(",")}]`;
+      return `[${value.map((item) => serializeJson(item, ancestors, depth + 1)).join(",")}]`;
     }
     if (!isPlainObject(value)) {
       throw new TypeError("Only plain objects are valid JSON objects");
@@ -239,7 +268,7 @@ function serializeJson(value, ancestors) {
       if (entryValue === void 0) {
         throw new TypeError(`JSON object property ${key} is undefined`);
       }
-      return `${JSON.stringify(key)}:${serializeJson(entryValue, ancestors)}`;
+      return `${JSON.stringify(key)}:${serializeJson(entryValue, ancestors, depth + 1)}`;
     }).join(",")}}`;
   } finally {
     ancestors.delete(value);
@@ -309,6 +338,9 @@ function hashIntentMetadata(metadata) {
   return keccak256(stringToBytes(stableJson(metadata)));
 }
 function hashIntentText(value) {
+  if (!isWellFormedUnicode(value)) {
+    throw new TypeError("Intent text must contain well-formed Unicode");
+  }
   return keccak256(stringToBytes(value));
 }
 function normalizeBytes32(value) {
@@ -570,16 +602,8 @@ function resolvePaymentRequirementsHash(options) {
   return normalizeBytes32(options.paymentRequirementsHash);
 }
 async function signTypedDataWithSigner(signer, typedData) {
-  try {
-    return await signer.signTypedData(typedData);
-  } catch (error) {
-    const account = signer.account;
-    if (!account) throw error;
-    return await signer.signTypedData({
-      ...typedData,
-      account
-    });
-  }
+  const parameters = signer.account ? { ...typedData, account: signer.account } : typedData;
+  return await signer.signTypedData(parameters);
 }
 
 // src/intents/extension.ts
@@ -638,6 +662,7 @@ export {
   IntentPaymentExtraSchema,
   JsonRecordSchema,
   JsonValueSchema,
+  MAX_JSON_NESTING_DEPTH,
   NonZeroEvmAddressSchema,
   PositiveSafeIntegerSchema,
   SignedHyperEvmExecutionIntentSchema,
@@ -664,6 +689,7 @@ export {
   hashIntentText,
   hashPaymentRequirements,
   isTerminalIntentExecutionStatus,
+  isWellFormedUnicode,
   normalizeBytes32,
   normalizeExecutionIntent,
   readIntentDeclaration,

@@ -22,8 +22,9 @@ import {
 
 const SETTLEMENT_CACHE_TTL_MS = 5 * 60 * 1000;
 const MATCH_LOOKAHEAD_MS = 30 * 1000;
-const MATCH_ATTEMPTS = 5;
-const MATCH_RETRY_DELAY_MS = 500;
+const PRE_SUBMIT_RECONCILIATION_ATTEMPTS = 5;
+const MATCH_RETRY_DELAY_MS = 1000;
+const POST_SUBMIT_CONFIRMATION_TIMEOUT_MS = 30 * 1000;
 const MAX_CLOCK_SKEW_MS = 30 * 1000;
 // The nonce is the client's wall clock, which validateTtl accepts up to
 // MAX_CLOCK_SKEW_MS ahead of ours; the exchange ledger timestamp can lag the
@@ -260,7 +261,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
         payer,
         exactPayload,
         requirements,
-        ttlValid ? 1 : MATCH_ATTEMPTS,
+        ttlValid ? 1 : PRE_SUBMIT_RECONCILIATION_ATTEMPTS,
       );
       if (existingHash) {
         return {
@@ -272,7 +273,12 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
         };
       }
 
-      if (!ttlValid) {
+      if (
+        !this.validateTtl(
+          exactPayload.action.nonce,
+          requirements.maxTimeoutSeconds,
+        )
+      ) {
         return {
           success: false,
           errorReason: "payment_expired",
@@ -410,7 +416,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     payer: string,
     payload: ExactHyperliquidPayload,
     requirements: PaymentRequirements,
-    attempts: number = MATCH_ATTEMPTS,
+    attempts?: number,
   ): Promise<string | undefined> {
     const action = payload.action as Record<string, unknown>;
     const destination = typeof action.destination === "string" ? action.destination : undefined;
@@ -420,8 +426,18 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
 
     const decimals = await this.resolveDecimals(requirements);
     const startTime = Math.max(0, payload.nonce - MATCH_LOOKBACK_MS);
+    const deadline =
+      attempts === undefined
+        ? Date.now() + POST_SUBMIT_CONFIRMATION_TIMEOUT_MS
+        : undefined;
+    let attempt = 0;
 
-    for (let attempt = 0; attempt < attempts; attempt++) {
+    while (
+      attempts === undefined
+        ? attempt === 0 || Date.now() < deadline!
+        : attempt < attempts
+    ) {
+      attempt += 1;
       try {
         const updates = await client.userNonFundingLedgerUpdates({
           user: payer as `0x${string}`,
@@ -454,9 +470,17 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
         }
       } catch {}
 
-      if (attempt < attempts - 1) {
+      if (attempts !== undefined) {
+        if (attempt >= attempts) break;
         await new Promise(r => setTimeout(r, MATCH_RETRY_DELAY_MS));
+        continue;
       }
+
+      const remaining = deadline! - Date.now();
+      if (remaining <= 0) break;
+      await new Promise(r =>
+        setTimeout(r, Math.min(MATCH_RETRY_DELAY_MS, remaining)),
+      );
     }
 
     return undefined;

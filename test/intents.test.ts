@@ -18,6 +18,9 @@ import {
   hashPaymentRequirements,
   HyperEvmExecutionIntentSchema,
   IntentPaymentExtraSchema,
+  JsonRecordSchema,
+  JsonValueSchema,
+  MAX_JSON_NESTING_DEPTH,
   type IntentDeclaration,
   type IntentExecutionStatus,
   normalizeExecutionIntent,
@@ -320,9 +323,77 @@ test("normalization, metadata, and typed-data hashes are deterministic", () => {
   );
 });
 
+function nestedJsonContainers(depth: number): unknown {
+  let value: unknown = "leaf";
+  for (let index = 0; index < depth; index += 1) {
+    value = { child: value };
+  }
+  return value;
+}
+
+test("JSON nesting boundaries are consistent across schemas and hashing", () => {
+  const maxValue = nestedJsonContainers(MAX_JSON_NESTING_DEPTH);
+  const overValue = nestedJsonContainers(MAX_JSON_NESTING_DEPTH + 1);
+  assert.equal(JsonValueSchema.safeParse(maxValue).success, true);
+  assert.doesNotThrow(() => stableJson(maxValue));
+  assert.equal(JsonValueSchema.safeParse(overValue).success, false);
+  assert.throws(() => stableJson(overValue), /maximum depth/);
+
+  const maxRecord = {
+    root: nestedJsonContainers(MAX_JSON_NESTING_DEPTH - 1),
+  };
+  const overRecord = {
+    root: nestedJsonContainers(MAX_JSON_NESTING_DEPTH),
+  };
+  assert.equal(JsonRecordSchema.safeParse(maxRecord).success, true);
+  assert.doesNotThrow(() => stableJson(maxRecord));
+  assert.equal(JsonRecordSchema.safeParse(overRecord).success, false);
+  assert.throws(() => stableJson(overRecord), /maximum depth/);
+});
+
+test("deep metadata fails closed without overflowing the verifier stack", async () => {
+  const metadata = { root: nestedJsonContainers(5_000) };
+  const intent = normalizeExecutionIntent(baseIntent() as never);
+
+  assert.doesNotThrow(() => {
+    const parsed = HyperEvmExecutionIntentSchema.safeParse({
+      ...intent,
+      metadata,
+    });
+    assert.equal(parsed.success, false);
+  });
+  assert.throws(() => stableJson(metadata), /maximum depth/);
+
+  const fixture = await makeFixture();
+  const result = await verifyPreSettlementExecutionIntent({
+    ...preSettlementInput(fixture),
+    paymentPayload: {
+      ...fixture.paymentPayload,
+      extensions: {
+        [X402_HL_INTENTS_EXTENSION]: {
+          ...fixture.signedIntent,
+          intent: {
+            ...fixture.signedIntent.intent,
+            metadata,
+          },
+        },
+      },
+    },
+  });
+  assert.equal(result.ok, false);
+  if (result.ok) assert.fail("expected malformed metadata to fail");
+  assert.equal(result.reason, "malformed_extension_payload");
+});
+
 test("text commitments hash UTF-8 bytes so 0x-prefixed text cannot collide", () => {
   assert.equal(hashIntentText("A"), keccak256(stringToBytes("A")));
+  assert.equal(hashIntentText("😀"), keccak256(stringToBytes("😀")));
   assert.notEqual(hashIntentText("0x41"), hashIntentText("A"));
+  assert.throws(() => hashIntentText("\ud800"), /well-formed Unicode/);
+  assert.throws(
+    () => normalizeExecutionIntent(baseIntent({ nonce: "\ud800" }) as never),
+    /well-formed Unicode/,
+  );
 
   const withTextNonce = normalizeExecutionIntent(
     baseIntent({ nonce: "A" }) as never,
@@ -367,6 +438,53 @@ test("text commitments hash UTF-8 bytes so 0x-prefixed text cannot collide", () 
       paymentRequirementsHash: HASH_A,
     }),
   );
+});
+
+test("verification rejects a nonce with unpaired UTF-16 surrogates", async () => {
+  const fixture = await makeFixture();
+  const result = await verifyPreSettlementExecutionIntent({
+    ...preSettlementInput(fixture),
+    paymentPayload: {
+      ...fixture.paymentPayload,
+      extensions: {
+        [X402_HL_INTENTS_EXTENSION]: {
+          ...fixture.signedIntent,
+          intent: {
+            ...fixture.signedIntent.intent,
+            nonce: "\ud800",
+          },
+        },
+      },
+    },
+  });
+  assert.equal(result.ok, false);
+  if (result.ok) assert.fail("expected malformed nonce to fail");
+  assert.equal(result.reason, "malformed_extension_payload");
+});
+
+test("a rejected signing request is not retried", async () => {
+  const fixture = await makeFixture();
+  const rejection = Object.assign(new Error("User rejected the request"), {
+    code: 4001,
+  });
+  let calls = 0;
+
+  await assert.rejects(
+    signExecutionIntent(
+      fixture.quote.intent,
+      {
+        account: account.address,
+        async signTypedData(parameters) {
+          calls += 1;
+          assert.equal(parameters.account, account.address);
+          throw rejection;
+        },
+      },
+      { paymentRequirements: fixture.paymentRequirements },
+    ),
+    error => error === rejection,
+  );
+  assert.equal(calls, 1);
 });
 
 test("a valid signed intent recovers its signer and verifies", async () => {
@@ -789,12 +907,16 @@ test("intent numeric fields beyond uint256 fail closed instead of throwing", asy
   const maxUint256 = (2n ** 256n - 1n).toString();
   const intent = normalizeExecutionIntent(baseIntent() as never);
 
-  await t.test("schema rejects a value above uint256", () => {
-    const parsed = HyperEvmExecutionIntentSchema.safeParse({
-      ...intent,
-      value: overflowValue,
-    });
-    assert.equal(parsed.success, false);
+  await t.test("schema rejects malformed and oversized decimal strings", () => {
+    for (const value of ["abc", "1e2", "9".repeat(10_000), overflowValue]) {
+      assert.doesNotThrow(() => {
+        const parsed = HyperEvmExecutionIntentSchema.safeParse({
+          ...intent,
+          value,
+        });
+        assert.equal(parsed.success, false);
+      });
+    }
   });
 
   await t.test("schema rejects a maxGasCost above uint256", () => {
@@ -847,24 +969,26 @@ test("intent numeric fields beyond uint256 fail closed instead of throwing", asy
     );
   });
 
-  await t.test("verification fails closed on an overflowing value", async () => {
+  await t.test("verification fails closed on invalid decimal fields", async () => {
     const fixture = await makeFixture();
-    const result = await verifyPaidExecutionIntent({
-      ...verificationInput(fixture),
-      paymentPayload: {
-        ...fixture.paymentPayload,
-        extensions: {
-          [X402_HL_INTENTS_EXTENSION]: {
-            ...fixture.signedIntent,
-            intent: {
-              ...fixture.signedIntent.intent,
-              value: overflowValue,
+    for (const value of ["abc", overflowValue]) {
+      const result = await verifyPaidExecutionIntent({
+        ...verificationInput(fixture),
+        paymentPayload: {
+          ...fixture.paymentPayload,
+          extensions: {
+            [X402_HL_INTENTS_EXTENSION]: {
+              ...fixture.signedIntent,
+              intent: {
+                ...fixture.signedIntent.intent,
+                value,
+              },
             },
           },
         },
-      },
-    });
-    assertFailure(result, "malformed_extension_payload");
+      });
+      assertFailure(result, "malformed_extension_payload");
+    }
   });
 });
 
@@ -924,9 +1048,10 @@ function executorConfig(
   } satisfies IntentExecutorConfig;
 }
 
-test("sequential duplicate execution returns the terminal receipt", async () => {
+test("payment transaction aliases return the terminal receipt without refunding", async () => {
   const fixture = await makeFixture();
   let executionCalls = 0;
+  let refundCalls = 0;
   const executor = createIntentExecutor(
     executorConfig(new InMemoryIntentExecutionStore(), {
       execute: async () => {
@@ -938,6 +1063,15 @@ test("sequential duplicate execution returns the terminal receipt", async () => 
           network: "eip155:998",
         };
       },
+      refund: async () => {
+        refundCalls += 1;
+        return {
+          success: true,
+          confirmed: true,
+          transaction: REFUND_TX,
+          network: "hyperliquid:testnet",
+        };
+      },
     }),
   );
 
@@ -946,7 +1080,7 @@ test("sequential duplicate execution returns the terminal receipt", async () => 
     ...executionInput(fixture),
     settleResponse: {
       ...fixture.settleResponse,
-      transaction: PAYMENT_TX.toUpperCase(),
+      transaction: `  ${PAYMENT_TX.toUpperCase()}\t`,
     },
   });
 
@@ -954,7 +1088,33 @@ test("sequential duplicate execution returns the terminal receipt", async () => 
   assert.equal(replay.status, "executed");
   assert.equal(replay.intentHash, first.intentHash);
   assert.equal(replay.executionTransaction, EXECUTION_TX);
+  assert.equal(replay.paymentTransaction, PAYMENT_TX);
   assert.equal(executionCalls, 1);
+  assert.equal(refundCalls, 0);
+});
+
+test("the store canonicalizes payment transaction writes and lookups", async () => {
+  const fixture = await makeFixture();
+  const store = new InMemoryIntentExecutionStore();
+  const receipt = await createIntentExecutor(executorConfig(store)).execute(
+    executionInput(fixture),
+  );
+
+  const replay = await store.registerPaid({
+    ...receipt,
+    paymentTransaction: ` ${PAYMENT_TX.toUpperCase()}\t`,
+  });
+  assert.equal(replay.kind, "existing");
+  assert.equal(replay.record.paymentTransaction, PAYMENT_TX);
+  assert.equal(
+    (
+      await store.getPayment(
+        "hyperliquid:testnet",
+        ` ${PAYMENT_TX.toUpperCase()} `,
+      )
+    )?.paymentTransaction,
+    PAYMENT_TX,
+  );
 });
 
 test("a second settled payment for the same intent is durably refunded", async () => {
@@ -1019,6 +1179,48 @@ test("a second settled payment for the same intent is durably refunded", async (
   );
   assert.equal(trackedDuplicate?.status, "refunded");
   assert.equal(trackedDuplicate?.refundTransaction, SECOND_REFUND_TX);
+});
+
+test("a delegated payer's second settled payment is durably refunded", async () => {
+  const fixture = await makeFixture();
+  const store = new InMemoryIntentExecutionStore();
+  const refundedPayers: string[] = [];
+  const executor = createIntentExecutor(
+    executorConfig(store, {
+      refund: async context => {
+        refundedPayers.push(context.record.payer);
+        return {
+          success: true,
+          confirmed: true,
+          transaction: SECOND_REFUND_TX,
+          network: "hyperliquid:testnet",
+        };
+      },
+    }),
+  );
+
+  const primary = await executor.execute(executionInput(fixture));
+  const duplicate = await executor.execute({
+    ...executionInput(fixture),
+    requireSamePayer: false,
+    settleResponse: {
+      ...fixture.settleResponse,
+      payer: otherAccount.address,
+      transaction: SECOND_PAYMENT_TX,
+    },
+  });
+
+  assert.equal(primary.status, "executed");
+  assert.equal(duplicate.status, "refunded");
+  assert.equal(duplicate.duplicatePayment, true);
+  assert.equal(duplicate.payer, otherAccount.address);
+  assert.equal(duplicate.paymentTransaction, SECOND_PAYMENT_TX);
+  assert.equal(duplicate.refundTransaction, SECOND_REFUND_TX);
+  assert.deepEqual(refundedPayers, [otherAccount.address]);
+  assert.equal(
+    (await store.getPayment("hyperliquid:testnet", SECOND_PAYMENT_TX))?.status,
+    "refunded",
+  );
 });
 
 test("a failed duplicate-payment refund retries by payment identity", async () => {
@@ -1948,6 +2150,53 @@ test("a confirmed execution without a transaction string requires manual interve
   assert.equal(refundCalls, 0);
 });
 
+test("invalid execution adapter metadata does not discard a confirmed receipt", async () => {
+  const fixture = await makeFixture();
+  const store = new InMemoryIntentExecutionStore();
+  const executor = createIntentExecutor(
+    executorConfig(store, {
+      execute: async () =>
+        ({
+          success: true,
+          confirmed: true,
+          transaction: `  ${EXECUTION_TX.toUpperCase()} `,
+          network: "eip155:998",
+          metadata: { bad: undefined },
+        }) as unknown as IntentExecutionResult,
+    }),
+  );
+
+  const receipt = await executor.execute(executionInput(fixture));
+  assert.equal(receipt.status, "executed");
+  assert.equal(receipt.executionTransaction, EXECUTION_TX);
+  assert.equal(receipt.metadata, undefined);
+  assert.equal((await store.get(receipt.intentHash))?.status, "executed");
+});
+
+test("invalid refund adapter metadata does not discard a confirmed receipt", async () => {
+  const fixture = await makeFixture();
+  const store = new InMemoryIntentExecutionStore();
+  const executor = createIntentExecutor(
+    executorConfig(store, {
+      execute: async () => ({ success: false, refundSafe: true }),
+      refund: async () =>
+        ({
+          success: true,
+          confirmed: true,
+          transaction: ` ${REFUND_TX.toUpperCase()}\t`,
+          network: "hyperliquid:testnet",
+          metadata: { bad: undefined },
+        }) as never,
+    }),
+  );
+
+  const receipt = await executor.execute(executionInput(fixture));
+  assert.equal(receipt.status, "refunded");
+  assert.equal(receipt.refundTransaction, REFUND_TX);
+  assert.equal(receipt.metadata, undefined);
+  assert.equal((await store.get(receipt.intentHash))?.status, "refunded");
+});
+
 test("a store conflict on the executed transition preserves the confirmed receipt", async () => {
   const fixture = await makeFixture();
   const backing = new InMemoryIntentExecutionStore();
@@ -1970,13 +2219,24 @@ test("a store conflict on the executed transition preserves the confirmed receip
       return backing.transition(transition);
     },
   };
-  const executor = createIntentExecutor(executorConfig(store));
+  const executor = createIntentExecutor(
+    executorConfig(store, {
+      execute: async () => ({
+        success: true,
+        confirmed: true,
+        transaction: EXECUTION_TX,
+        network: "eip155:998",
+        metadata: { provider: "destination" },
+      }),
+    }),
+  );
 
   const receipt = await executor.execute(executionInput(fixture));
   assert.equal(receipt.status, "manual_intervention");
   assert.equal(receipt.failure?.reason, "store_conflict");
   assert.equal(receipt.executionTransaction, EXECUTION_TX);
   assert.equal(receipt.executionNetwork, "eip155:998");
+  assert.deepEqual(receipt.metadata, { provider: "destination" });
 });
 
 test("a record still parks manually when the store also rejects the receipt evidence", async () => {
@@ -2032,6 +2292,13 @@ test("a store conflict on the refunded transition preserves the refund receipt",
   const executor = createIntentExecutor(
     executorConfig(store, {
       execute: async () => ({ success: false, refundSafe: true }),
+      refund: async () => ({
+        success: true,
+        confirmed: true,
+        transaction: REFUND_TX,
+        network: "hyperliquid:testnet",
+        metadata: { provider: "payment" },
+      }),
     }),
   );
 
@@ -2040,4 +2307,5 @@ test("a store conflict on the refunded transition preserves the refund receipt",
   assert.equal(receipt.failure?.reason, "store_conflict");
   assert.equal(receipt.refundTransaction, REFUND_TX);
   assert.equal(receipt.refundNetwork, "hyperliquid:testnet");
+  assert.deepEqual(receipt.metadata, { provider: "payment" });
 });

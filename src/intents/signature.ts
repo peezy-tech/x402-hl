@@ -111,14 +111,8 @@ async function signTypedDataWithSigner(
   signer: IntentSigner,
   typedData: ReturnType<typeof buildExecutionIntentTypedData>,
 ): Promise<Hex> {
-  try {
-    return (await signer.signTypedData(typedData)) as Hex;
-  } catch (error) {
-    const account = signer.account;
-    if (!account) throw error;
-    return (await signer.signTypedData({
-      ...typedData,
-      account,
-    })) as Hex;
-  }
+  const parameters = signer.account
+    ? { ...typedData, account: signer.account }
+    : typedData;
+  return (await signer.signTypedData(parameters)) as Hex;
 }
