@@ -211,17 +211,17 @@ requirements after settlement.
 
 ## 3. Validate Payment Id, Settlement, And Quote
 
-Before requesting settlement, run `verifyPreSettlementExecutionIntent` (or the
+Before requesting settlement, validate the upstream payment identifier against
+the persisted quote, then run `verifyPreSettlementExecutionIntent` (or the
 executor's `verifyBeforeSettlement`) with the same payload, requirements, and
-persisted quote values. A payload that fails those settlement-independent
-checks — a missing, malformed, mismatched, or unsigned intent — must be
-rejected without settling, because it can never be registered or automatically
-refunded afterwards.
+persisted quote values. A payload that fails either application-level binding or
+settlement-independent intent checks — a missing, malformed, mismatched, or
+unsigned intent — must be rejected without settling, because it can never be
+registered or automatically refunded afterwards.
 
-The framework-specific request adapter should provide the actual payment
-payload, the exact settled requirements, and the facilitator response. Validate
-the upstream payment identifier and compare it to the persisted quote before
-execution:
+After settlement, provide the actual payment payload, exact settled
+requirements, and facilitator response to paid-intent verification. Repeat the
+payment-identifier check as defense in depth:
 
 ```ts
 import {
@@ -258,21 +258,26 @@ signature. Never replace settlement evidence with a successful facilitator
 
 ## 4. Implement A Durable Store Adapter
 
-The store is the replay and concurrency boundary. A production table needs at
-least these unique indexes:
+The store is the replay and concurrency boundary. Store every settled payment,
+not only one row per intent: one payment is the primary execution funding row,
+and later payments for the same signed intent are refund-only rows. A production
+table needs at least these keys and indexes (transaction identifiers should be
+canonicalized to lowercase on write):
 
 ```sql
-CREATE UNIQUE INDEX intents_intent_hash_uq
-  ON intent_executions (intent_hash);
-CREATE UNIQUE INDEX intents_quote_uq
-  ON intent_executions (application, gateway, quote_id);
-CREATE UNIQUE INDEX intents_payment_tx_uq
-  ON intent_executions (payment_network, payment_transaction);
+ALTER TABLE intent_payments
+  ADD PRIMARY KEY (payment_network, payment_transaction);
+CREATE UNIQUE INDEX intents_primary_intent_uq
+  ON intent_payments (intent_hash)
+  WHERE primary_payment;
+CREATE UNIQUE INDEX intents_primary_quote_uq
+  ON intent_payments (application, gateway, quote_id)
+  WHERE primary_payment;
 CREATE UNIQUE INDEX intents_execution_tx_uq
-  ON intent_executions (execution_network, execution_transaction)
+  ON intent_payments (execution_network, execution_transaction)
   WHERE execution_transaction IS NOT NULL;
 CREATE UNIQUE INDEX intents_refund_tx_uq
-  ON intent_executions (refund_network, refund_transaction)
+  ON intent_payments (refund_network, refund_transaction)
   WHERE refund_transaction IS NOT NULL;
 ```
 
@@ -290,33 +295,44 @@ class PostgresIntentStore implements IntentExecutionStore {
 
   async registerPaid(record: IntentExecutionRecord) {
     return this.db.transaction(async tx => {
-      // INSERT the complete record. On a unique conflict, load the owner and
-      // return { kind: "existing" } only for the same registration; otherwise
-      // return the specific { kind: "conflict", key, record } result.
+      // INSERT the primary payment, or atomically insert a refund-only
+      // duplicate-payment row when the same intent already has a different
+      // settled transaction. Never return a conflict without retaining that
+      // additional payment.
       return atomicRegisterPaid(tx, record);
     });
   }
 
   async get(intentHash: string) {
-    return loadIntentRecord(this.db, intentHash);
+    return loadPrimaryIntentRecord(this.db, intentHash);
+  }
+
+  async getPayment(paymentNetwork: string, paymentTransaction: string) {
+    return loadPaymentRecord(
+      this.db,
+      paymentNetwork,
+      paymentTransaction.toLowerCase(),
+    );
   }
 
   async transition(input: IntentExecutionTransition) {
     return this.db.transaction(async tx => {
-      // One UPDATE must match intentHash + expectedRevision + from status and,
-      // when present, the claim token. Increment revision in that UPDATE,
-      // validate the legal state transition, and return the updated row.
+      // One UPDATE must match the selected payment row + expected revision +
+      // from status and, when present, the claim token. Increment revision in
+      // that UPDATE, validate the legal state transition, and return the row.
       return compareAndSwapIntent(tx, input);
     });
   }
 }
 ```
 
-`atomicRegisterPaid`, `loadIntentRecord`, and `compareAndSwapIntent` are
-database-specific application code; the example names are not package exports.
-Test the adapter with two processes racing the same quote, payment transaction,
-execution claim, and refund claim. `InMemoryIntentExecutionStore` is only for
-tests and single-process development.
+`atomicRegisterPaid`, `loadPrimaryIntentRecord`, `loadPaymentRecord`, and
+`compareAndSwapIntent` are database-specific application code; the example
+names are not package exports. This is a store-interface migration: adapters
+must add payment-keyed lookup and compare-and-swap support before upgrading.
+Test two processes racing the same quote, distinct payments for one intent,
+payment transaction, execution claim, and refund claim.
+`InMemoryIntentExecutionStore` is only for tests and single-process development.
 
 ## 5. Canonically Decode And Allowlist The Call
 

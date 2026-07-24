@@ -12,7 +12,6 @@ import {
 } from "./types";
 import {
   hashIntentText,
-  normalizeBytes32,
   hashExecutionIntentTemplate,
 } from "./typed-data";
 
@@ -82,7 +81,7 @@ export function createIntentPaymentExtra(
     maxGasCost: intent.maxGasCost,
     maxSlippageBps: intent.maxSlippageBps,
     deadline: intent.deadline,
-    nonceHash: normalizeBytes32(intent.nonce),
+    nonceHash: hashIntentText(intent.nonce),
     metadataHash: intent.metadataHash,
   });
 }
@@ -187,7 +186,7 @@ export function verifyIntentPaymentExtra(
       "Payment requirements contain a different execution deadline",
     ],
     [
-      extra.nonceHash.toLowerCase() === normalizeBytes32(intent.nonce).toLowerCase(),
+      extra.nonceHash.toLowerCase() === hashIntentText(intent.nonce).toLowerCase(),
       "nonce_mismatch",
       "Payment requirements contain a different execution nonce",
     ],

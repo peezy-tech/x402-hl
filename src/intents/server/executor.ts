@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Address, Hex } from "viem";
 import { getAddress, keccak256 } from "viem";
 import {
+  DecimalIntegerStringSchema,
   ExecutionIntentDomain,
   IntentFailure,
   IntentFailureReason,
@@ -23,6 +24,7 @@ import {
 import type {
   IntentExecutionRecord,
   IntentExecutionStore,
+  IntentExecutionTransition,
   IntentExecutionTransitionPatch,
   IntentStoreTransitionResult,
 } from "./store";
@@ -145,6 +147,13 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
       return config.store.get(intentHash);
     },
 
+    async getPayment(
+      paymentNetwork: string,
+      paymentTransaction: string,
+    ): Promise<IntentExecutionRecord | undefined> {
+      return config.store.getPayment(paymentNetwork, paymentTransaction);
+    },
+
     async verify(
       input: Omit<PaidIntentVerificationInput, "expectedDomain">,
     ): Promise<PaidIntentVerificationResult> {
@@ -202,6 +211,13 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
       }
 
       let record = registration.record;
+      if (registration.kind === "duplicate_payment") {
+        if (isTerminalIntentExecutionStatus(record.status)) return record;
+        if (record.status === "refund_pending" || record.status === "refund_failed") {
+          return runRefund(config, record, claimToken);
+        }
+        return record;
+      }
       if (isTerminalIntentExecutionStatus(record.status)) return record;
       if (record.status !== "paid") return record;
 
@@ -436,6 +452,79 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
       return runRefund(config, record, claimToken);
     },
 
+    async retryPaymentRefund(
+      paymentNetwork: string,
+      paymentTransaction: string,
+    ): Promise<IntentExecutionRecord> {
+      const record = await config.store.getPayment(
+        paymentNetwork,
+        paymentTransaction,
+      );
+      if (!record) {
+        throw new Error("invalid_state: payment record was not found");
+      }
+      if (isTerminalIntentExecutionStatus(record.status)) return record;
+      if (record.status !== "refund_pending" && record.status !== "refund_failed") {
+        return record;
+      }
+      return runRefund(config, record, claimToken);
+    },
+
+    async recoverPayment(
+      paymentNetwork: string,
+      paymentTransaction: string,
+    ): Promise<IntentExecutionRecord> {
+      const record = await config.store.getPayment(
+        paymentNetwork,
+        paymentTransaction,
+      );
+      if (!record) {
+        throw new Error("invalid_state: payment record was not found");
+      }
+      if (!record.duplicatePayment) return record;
+      if (isTerminalIntentExecutionStatus(record.status)) return record;
+
+      if (record.status === "refund_claimed") {
+        const released = await config.store.transition(
+          paymentTransition(record, {
+            intentHash: record.intentHash,
+            expectedRevision: record.revision,
+            from: "refund_claimed",
+            to: "refund_failed",
+            claimToken: record.claimToken,
+            patch: {
+              claimToken: undefined,
+              failure: safeFailure(
+                "refund_failed",
+                "Refund claim was abandoned before submission and may be retried",
+                true,
+              ),
+            },
+          }),
+        );
+        if (released.kind !== "updated") {
+          return recordFromConflict(released, record);
+        }
+        return runRefund(config, released.record, claimToken);
+      }
+      if (record.status === "refund_submitted") {
+        return markManualIntervention(
+          config.store,
+          record,
+          record.claimToken,
+          safeFailure(
+            "refund_uncertain",
+            "Refund was abandoned after submission began; reconcile before another attempt",
+            false,
+          ),
+        );
+      }
+      if (record.status === "refund_pending" || record.status === "refund_failed") {
+        return runRefund(config, record, claimToken);
+      }
+      return record;
+    },
+
     /**
      * Resume an intent abandoned mid-transition, for example by a process
      * crash, using the claim token persisted on the record. Adapters are only
@@ -629,7 +718,15 @@ function verifySimulation(
       );
     }
 
-    if (BigInt(simulation.gasCost) > BigInt(record.intent.maxGasCost)) {
+    const gasCost = DecimalIntegerStringSchema.safeParse(simulation.gasCost);
+    if (!gasCost.success) {
+      return safeFailure(
+        "simulation_failed",
+        "Simulation returned invalid constraint evidence",
+        false,
+      );
+    }
+    if (BigInt(gasCost.data) > BigInt(record.intent.maxGasCost)) {
       return safeFailure(
         "gas_cost_exceeded",
         "Simulated gas cost exceeds the signed maximum",
@@ -706,25 +803,29 @@ async function runRefund(
   createClaimToken: () => string,
 ): Promise<IntentExecutionRecord> {
   const refundClaimToken = createClaimToken();
-  const claim = await config.store.transition({
-    intentHash: input.intentHash,
-    expectedRevision: input.revision,
-    from: input.status,
-    to: "refund_claimed",
-    patch: {
-      claimToken: refundClaimToken,
-      refundAttempts: input.refundAttempts + 1,
-    },
-  });
+  const claim = await config.store.transition(
+    paymentTransition(input, {
+      intentHash: input.intentHash,
+      expectedRevision: input.revision,
+      from: input.status,
+      to: "refund_claimed",
+      patch: {
+        claimToken: refundClaimToken,
+        refundAttempts: input.refundAttempts + 1,
+      },
+    }),
+  );
   if (claim.kind !== "updated") return recordFromConflict(claim, input);
 
-  const submitted = await config.store.transition({
-    intentHash: claim.record.intentHash,
-    expectedRevision: claim.record.revision,
-    from: "refund_claimed",
-    to: "refund_submitted",
-    claimToken: refundClaimToken,
-  });
+  const submitted = await config.store.transition(
+    paymentTransition(claim.record, {
+      intentHash: claim.record.intentHash,
+      expectedRevision: claim.record.revision,
+      from: "refund_claimed",
+      to: "refund_submitted",
+      claimToken: refundClaimToken,
+    }),
+  );
   if (submitted.kind !== "updated") {
     return recordFromConflict(submitted, claim.record);
   }
@@ -735,7 +836,7 @@ async function runRefund(
     refund = await config.refund({
       intent: record.intent,
       record,
-      idempotencyKey: `${record.intentHash}:refund`,
+      idempotencyKey: refundIdempotencyKey(record),
     });
   } catch {
     return markManualIntervention(
@@ -769,21 +870,39 @@ async function runRefund(
         ),
       );
     }
+    if (refund.network !== record.paymentNetwork) {
+      return markManualIntervention(
+        config.store,
+        record,
+        refundClaimToken,
+        safeFailure(
+          "refund_uncertain",
+          "Refund adapter returned a confirmed transaction on the wrong payment network",
+          false,
+        ),
+        {
+          refundNetwork: refund.network,
+          refundTransaction: refund.transaction,
+        },
+      );
+    }
 
-    const refunded = await config.store.transition({
-      intentHash: record.intentHash,
-      expectedRevision: record.revision,
-      from: "refund_submitted",
-      to: "refunded",
-      claimToken: refundClaimToken,
-      patch: {
-        claimToken: undefined,
-        refundNetwork: refund.network,
-        refundTransaction: refund.transaction,
-        failure: undefined,
-        metadata: refund.metadata,
-      },
-    });
+    const refunded = await config.store.transition(
+      paymentTransition(record, {
+        intentHash: record.intentHash,
+        expectedRevision: record.revision,
+        from: "refund_submitted",
+        to: "refunded",
+        claimToken: refundClaimToken,
+        patch: {
+          claimToken: undefined,
+          refundNetwork: refund.network,
+          refundTransaction: refund.transaction,
+          failure: undefined,
+          metadata: refund.metadata,
+        },
+      }),
+    );
     if (refunded.kind === "updated") return refunded.record;
     // Keep the confirmed receipt on the parked record so operators do not
     // have to re-derive it through the adapter idempotency key.
@@ -825,21 +944,23 @@ async function runRefund(
     );
   }
 
-  const failed = await config.store.transition({
-    intentHash: record.intentHash,
-    expectedRevision: record.revision,
-    from: "refund_submitted",
-    to: "refund_failed",
-    claimToken: refundClaimToken,
-    patch: {
-      claimToken: undefined,
-      failure: safeFailure(
-        "refund_failed",
-        "Refund failed and may be retried explicitly",
-        true,
-      ),
-    },
-  });
+  const failed = await config.store.transition(
+    paymentTransition(record, {
+      intentHash: record.intentHash,
+      expectedRevision: record.revision,
+      from: "refund_submitted",
+      to: "refund_failed",
+      claimToken: refundClaimToken,
+      patch: {
+        claimToken: undefined,
+        failure: safeFailure(
+          "refund_failed",
+          "Refund failed and may be retried explicitly",
+          true,
+        ),
+      },
+    }),
+  );
   return failed.kind === "updated"
     ? failed.record
     : recordFromConflict(failed, record);
@@ -875,18 +996,20 @@ async function markManualIntervention(
   failure: IntentFailure,
   evidence?: IntentExecutionTransitionPatch,
 ): Promise<IntentExecutionRecord> {
-  const manual = await store.transition({
-    intentHash: record.intentHash,
-    expectedRevision: record.revision,
-    from: record.status,
-    to: "manual_intervention",
-    claimToken,
-    patch: {
-      ...evidence,
-      claimToken: undefined,
-      failure,
-    },
-  });
+  const manual = await store.transition(
+    paymentTransition(record, {
+      intentHash: record.intentHash,
+      expectedRevision: record.revision,
+      from: record.status,
+      to: "manual_intervention",
+      claimToken,
+      patch: {
+        ...evidence,
+        claimToken: undefined,
+        failure,
+      },
+    }),
+  );
   if (manual.kind === "updated") return manual.record;
   // The store may reject the receipt evidence itself (for example a unique
   // execution-transaction index); parking the record still matters more than
@@ -899,6 +1022,28 @@ async function markManualIntervention(
     return markManualIntervention(store, record, claimToken, failure);
   }
   return recordFromConflict(manual, record);
+}
+
+function paymentTransition(
+  record: IntentExecutionRecord,
+  transition: Omit<
+    IntentExecutionTransition,
+    "paymentNetwork" | "paymentTransaction"
+  >,
+): IntentExecutionTransition {
+  return record.duplicatePayment
+    ? {
+        ...transition,
+        paymentNetwork: record.paymentNetwork,
+        paymentTransaction: record.paymentTransaction,
+      }
+    : transition;
+}
+
+function refundIdempotencyKey(record: IntentExecutionRecord): string {
+  return record.duplicatePayment
+    ? `${record.intentHash}:refund:${record.paymentNetwork}:${record.paymentTransaction.toLowerCase()}`
+    : `${record.intentHash}:refund`;
 }
 
 function safeFailure(

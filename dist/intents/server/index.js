@@ -23,6 +23,7 @@ var DecimalIntegerStringSchema = z.string().max(78).regex(DecimalIntegerRegex).r
   message: "Value exceeds the uint256 range"
 });
 var IntentApplicationSchema = z.string().trim().min(1).max(256);
+var PositiveSafeIntegerSchema = z.number().int().positive().safe();
 var JsonValueSchema = z.lazy(
   () => z.union([
     z.null(),
@@ -44,7 +45,7 @@ var HyperEvmExecutionIntentSchema = z.object({
   application: IntentApplicationSchema,
   gateway: NonZeroEvmAddressSchema,
   user: EvmAddressSchema,
-  chainId: z.number().int().positive(),
+  chainId: PositiveSafeIntegerSchema,
   target: EvmAddressSchema,
   callData: HexSchema,
   value: DecimalIntegerStringSchema,
@@ -52,7 +53,7 @@ var HyperEvmExecutionIntentSchema = z.object({
   refundAddress: NonZeroEvmAddressSchema,
   maxGasCost: DecimalIntegerStringSchema,
   maxSlippageBps: z.number().int().min(0).max(1e4),
-  deadline: z.number().int().positive(),
+  deadline: PositiveSafeIntegerSchema,
   nonce: z.string().min(1).max(256),
   quoteId: z.string().min(1).max(256),
   metadataHash: Bytes32Schema,
@@ -80,7 +81,7 @@ var IntentPaymentExtraSchema = z.object({
   quoteId: z.string().min(1).max(256),
   applicationHash: Bytes32Schema,
   gateway: EvmAddressSchema,
-  chainId: z.number().int().positive(),
+  chainId: PositiveSafeIntegerSchema,
   target: EvmAddressSchema,
   callDataHash: Bytes32Schema,
   value: DecimalIntegerStringSchema,
@@ -88,7 +89,7 @@ var IntentPaymentExtraSchema = z.object({
   refundAddress: EvmAddressSchema,
   maxGasCost: DecimalIntegerStringSchema,
   maxSlippageBps: z.number().int().min(0).max(1e4),
-  deadline: z.number().int().positive(),
+  deadline: PositiveSafeIntegerSchema,
   nonceHash: Bytes32Schema,
   metadataHash: Bytes32Schema
 });
@@ -136,6 +137,7 @@ var IntentFailureReasonSchema = z.enum([
   "execution_intent_expired",
   "invalid_execution_intent_signature",
   "execution_intent_payer_mismatch",
+  "duplicate_payment",
   "store_conflict",
   "policy_denied",
   "policy_binding_mismatch",
@@ -170,6 +172,7 @@ var IntentExecutionReceiptSchema = z.object({
   paymentAmount: z.string().min(1),
   paymentPayTo: z.string().min(1),
   paymentTransaction: z.string().min(1),
+  duplicatePayment: z.literal(true).optional(),
   executionNetwork: z.string().optional(),
   executionTransaction: z.string().optional(),
   refundNetwork: z.string().optional(),
@@ -219,6 +222,11 @@ function serializeJson(value, ancestors) {
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
+      for (let index = 0; index < value.length; index += 1) {
+        if (!Object.hasOwn(value, index)) {
+          throw new TypeError("Sparse arrays are not valid JSON");
+        }
+      }
       return `[${value.map((item) => serializeJson(item, ancestors)).join(",")}]`;
     }
     if (!isPlainObject(value)) {
@@ -269,8 +277,12 @@ var X402_HL_INTENT_TYPES = {
   ]
 };
 function normalizeExecutionIntent(input) {
-  const calculatedMetadataHash = hashIntentMetadata(input.metadata);
-  if (input.metadata != null && input.metadataHash != null && input.metadataHash.toLowerCase() !== calculatedMetadataHash.toLowerCase()) {
+  const metadata = input.metadata == null ? void 0 : JsonRecordSchema.parse(input.metadata);
+  if (input.metadata != null && stableJson(input.metadata) !== stableJson(metadata)) {
+    throw new Error("Intent metadata is not canonical JSON");
+  }
+  const calculatedMetadataHash = hashIntentMetadata(metadata);
+  if (metadata != null && input.metadataHash != null && input.metadataHash.toLowerCase() !== calculatedMetadataHash.toLowerCase()) {
     throw new Error("Intent metadataHash does not match canonical metadata");
   }
   const intent = {
@@ -287,7 +299,8 @@ function normalizeExecutionIntent(input) {
     maxGasCost: input.maxGasCost ?? "0",
     maxSlippageBps: input.maxSlippageBps ?? 0,
     quoteId: input.quoteId ?? input.nonce,
-    metadataHash: input.metadataHash ?? calculatedMetadataHash
+    metadataHash: input.metadataHash ?? calculatedMetadataHash,
+    metadata
   };
   return HyperEvmExecutionIntentSchema.parse(intent);
 }
@@ -329,8 +342,8 @@ function buildExecutionIntentTypedData(input, binding) {
       maxGasCost: BigInt(intent.maxGasCost),
       maxSlippageBps: intent.maxSlippageBps,
       deadline: BigInt(intent.deadline),
-      nonce: normalizeBytes32(intent.nonce),
-      quoteId: normalizeBytes32(intent.quoteId),
+      nonce: hashIntentText(intent.nonce),
+      quoteId: hashIntentText(intent.quoteId),
       metadataHash: intent.metadataHash,
       paymentRequirementsHash
     }
@@ -378,7 +391,7 @@ function createIntentPaymentExtra(intent, intentTemplateHash = hashExecutionInte
     maxGasCost: intent.maxGasCost,
     maxSlippageBps: intent.maxSlippageBps,
     deadline: intent.deadline,
-    nonceHash: normalizeBytes32(intent.nonce),
+    nonceHash: hashIntentText(intent.nonce),
     metadataHash: intent.metadataHash
   });
 }
@@ -472,7 +485,7 @@ function verifyIntentPaymentExtra(intent, requirements) {
       "Payment requirements contain a different execution deadline"
     ],
     [
-      extra.nonceHash.toLowerCase() === normalizeBytes32(intent.nonce).toLowerCase(),
+      extra.nonceHash.toLowerCase() === hashIntentText(intent.nonce).toLowerCase(),
       "nonce_mismatch",
       "Payment requirements contain a different execution nonce"
     ],
@@ -611,9 +624,12 @@ function readSignedExecutionIntent(paymentPayload) {
 
 // src/intents/server/quote.ts
 function createIntentQuote(input) {
+  if (input.intent.quoteId !== void 0 && input.intent.quoteId !== input.id) {
+    throw new Error("Intent quoteId must match the quote id");
+  }
   const intent = normalizeExecutionIntent({
     ...input.intent,
-    quoteId: input.intent.quoteId ?? input.id
+    quoteId: input.id
   });
   const declaration = createIntentDeclaration(intent);
   const paymentExtra = createIntentPaymentExtra(
@@ -885,6 +901,7 @@ var IntentExecutionRecordSchema = IntentExecutionReceiptSchema.extend({
 });
 var InMemoryIntentExecutionStore = class {
   records = /* @__PURE__ */ new Map();
+  duplicatePayments = /* @__PURE__ */ new Map();
   quotes = /* @__PURE__ */ new Map();
   payments = /* @__PURE__ */ new Map();
   executions = /* @__PURE__ */ new Map();
@@ -892,13 +909,53 @@ var InMemoryIntentExecutionStore = class {
   async registerPaid(input) {
     const record = IntentExecutionRecordSchema.parse(input);
     const intentKey = normalizeHash(record.intentHash);
+    const paymentKey = transactionIndex(
+      record.paymentNetwork,
+      record.paymentTransaction
+    );
+    const paymentOwner = this.payments.get(paymentKey);
+    if (paymentOwner) {
+      const paymentRecord = this.recordForLocator(paymentOwner);
+      if (paymentRecord && samePaymentRegistration(paymentRecord, record)) {
+        return paymentRecord.duplicatePayment ? { kind: "duplicate_payment", record: cloneRecord(paymentRecord) } : { kind: "existing", record: cloneRecord(paymentRecord) };
+      }
+      return {
+        kind: "conflict",
+        key: "payment_transaction",
+        record: paymentRecord ? cloneRecord(paymentRecord) : void 0
+      };
+    }
     const existing = this.records.get(intentKey);
     if (existing) {
-      return sameRegistration(existing, record) ? { kind: "existing", record: cloneRecord(existing) } : {
-        kind: "conflict",
-        key: "intent_hash",
-        record: cloneRecord(existing)
-      };
+      if (!sameIntentRegistration(existing, record)) {
+        return {
+          kind: "conflict",
+          key: "intent_hash",
+          record: cloneRecord(existing)
+        };
+      }
+      const duplicate = IntentExecutionRecordSchema.parse({
+        ...record,
+        revision: 0,
+        status: "refund_pending",
+        duplicatePayment: true,
+        executionNetwork: void 0,
+        executionTransaction: void 0,
+        refundNetwork: void 0,
+        refundTransaction: void 0,
+        executionAttempts: 0,
+        refundAttempts: 0,
+        claimToken: void 0,
+        failure: {
+          reason: "duplicate_payment",
+          message: "An additional settled payment for this intent must be refunded",
+          retryable: true
+        },
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+      this.duplicatePayments.set(paymentKey, cloneRecord(duplicate));
+      this.payments.set(paymentKey, { kind: "duplicate", paymentKey });
+      return { kind: "duplicate_payment", record: cloneRecord(duplicate) };
     }
     const quoteKey = quoteIndex(record);
     const quoteOwner = this.quotes.get(quoteKey);
@@ -909,32 +966,30 @@ var InMemoryIntentExecutionStore = class {
         record: cloneRecord(this.records.get(quoteOwner))
       };
     }
-    const paymentKey = transactionIndex(
-      record.paymentNetwork,
-      record.paymentTransaction
-    );
-    const paymentOwner = this.payments.get(paymentKey);
-    if (paymentOwner) {
-      return {
-        kind: "conflict",
-        key: "payment_transaction",
-        record: cloneRecord(this.records.get(paymentOwner))
-      };
-    }
     const stored = cloneRecord(record);
     this.records.set(intentKey, stored);
     this.quotes.set(quoteKey, intentKey);
-    this.payments.set(paymentKey, intentKey);
+    this.payments.set(paymentKey, { kind: "primary", intentKey });
     return { kind: "created", record: cloneRecord(stored) };
   }
   async get(intentHash) {
     const record = this.records.get(normalizeHash(intentHash));
     return record ? cloneRecord(record) : void 0;
   }
+  async getPayment(paymentNetwork, paymentTransaction) {
+    const locator = this.payments.get(
+      transactionIndex(paymentNetwork, paymentTransaction)
+    );
+    const record = locator ? this.recordForLocator(locator) : void 0;
+    return record ? cloneRecord(record) : void 0;
+  }
   async transition(input) {
-    const intentKey = normalizeHash(input.intentHash);
-    const current = this.records.get(intentKey);
-    if (!current) return { kind: "not_found" };
+    const locator = this.transitionLocator(input);
+    const current = locator ? this.recordForLocator(locator) : void 0;
+    if (!locator || !current) return { kind: "not_found" };
+    if (normalizeHash(current.intentHash) !== normalizeHash(input.intentHash)) {
+      return { kind: "not_found" };
+    }
     if (current.revision !== input.expectedRevision) {
       return {
         kind: "conflict",
@@ -970,7 +1025,8 @@ var InMemoryIntentExecutionStore = class {
       revision: current.revision + 1,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     });
-    const transactionConflict = this.transactionConflict(intentKey, current, next);
+    const ownerKey = locatorKey(locator);
+    const transactionConflict = this.transactionConflict(ownerKey, current, next);
     if (transactionConflict) {
       return {
         kind: "conflict",
@@ -978,33 +1034,55 @@ var InMemoryIntentExecutionStore = class {
         record: cloneRecord(current)
       };
     }
-    this.records.set(intentKey, cloneRecord(next));
+    this.storeForLocator(locator, next);
     if (next.executionNetwork && next.executionTransaction) {
       this.executions.set(
         transactionIndex(next.executionNetwork, next.executionTransaction),
-        intentKey
+        ownerKey
       );
     }
     if (next.refundNetwork && next.refundTransaction) {
       this.refunds.set(
         transactionIndex(next.refundNetwork, next.refundTransaction),
-        intentKey
+        ownerKey
       );
     }
     return { kind: "updated", record: cloneRecord(next) };
   }
-  transactionConflict(intentKey, current, next) {
+  transitionLocator(input) {
+    const hasPaymentNetwork = typeof input.paymentNetwork === "string";
+    const hasPaymentTransaction = typeof input.paymentTransaction === "string";
+    if (hasPaymentNetwork !== hasPaymentTransaction) return void 0;
+    if (hasPaymentNetwork && hasPaymentTransaction) {
+      return this.payments.get(
+        transactionIndex(input.paymentNetwork, input.paymentTransaction)
+      );
+    }
+    const intentKey = normalizeHash(input.intentHash);
+    return this.records.has(intentKey) ? { kind: "primary", intentKey } : void 0;
+  }
+  recordForLocator(locator) {
+    return locator.kind === "primary" ? this.records.get(locator.intentKey) : this.duplicatePayments.get(locator.paymentKey);
+  }
+  storeForLocator(locator, record) {
+    if (locator.kind === "primary") {
+      this.records.set(locator.intentKey, cloneRecord(record));
+    } else {
+      this.duplicatePayments.set(locator.paymentKey, cloneRecord(record));
+    }
+  }
+  transactionConflict(ownerKey, current, next) {
     if (next.executionNetwork && next.executionTransaction && (next.executionNetwork !== current.executionNetwork || next.executionTransaction !== current.executionTransaction)) {
       const owner = this.executions.get(
         transactionIndex(next.executionNetwork, next.executionTransaction)
       );
-      if (owner && owner !== intentKey) return "execution_transaction";
+      if (owner && owner !== ownerKey) return "execution_transaction";
     }
     if (next.refundNetwork && next.refundTransaction && (next.refundNetwork !== current.refundNetwork || next.refundTransaction !== current.refundTransaction)) {
       const owner = this.refunds.get(
         transactionIndex(next.refundNetwork, next.refundTransaction)
       );
-      if (owner && owner !== intentKey) return "refund_transaction";
+      if (owner && owner !== ownerKey) return "refund_transaction";
     }
     return void 0;
   }
@@ -1036,8 +1114,11 @@ function isLegalIntentExecutionTransition(from, to) {
 function isLegalTransition(from, to) {
   return LEGAL_TRANSITIONS[from].includes(to);
 }
-function sameRegistration(left, right) {
-  return normalizeHash(left.intentHash) === normalizeHash(right.intentHash) && left.application === right.application && left.gateway.toLowerCase() === right.gateway.toLowerCase() && left.quoteId === right.quoteId && left.paymentRequirementsHash.toLowerCase() === right.paymentRequirementsHash.toLowerCase() && left.paymentNetwork === right.paymentNetwork && left.paymentTransaction.toLowerCase() === right.paymentTransaction.toLowerCase();
+function sameIntentRegistration(left, right) {
+  return normalizeHash(left.intentHash) === normalizeHash(right.intentHash) && left.intentTemplateHash.toLowerCase() === right.intentTemplateHash.toLowerCase() && left.application === right.application && left.gateway.toLowerCase() === right.gateway.toLowerCase() && left.quoteId === right.quoteId && left.paymentRequirementsHash.toLowerCase() === right.paymentRequirementsHash.toLowerCase() && left.payer.toLowerCase() === right.payer.toLowerCase() && left.paymentScheme === right.paymentScheme && left.paymentNetwork === right.paymentNetwork && left.paymentAsset === right.paymentAsset && left.paymentAmount === right.paymentAmount && left.paymentPayTo.toLowerCase() === right.paymentPayTo.toLowerCase();
+}
+function samePaymentRegistration(left, right) {
+  return sameIntentRegistration(left, right) && left.paymentTransaction.toLowerCase() === right.paymentTransaction.toLowerCase();
 }
 function normalizeHash(value) {
   return value.toLowerCase();
@@ -1051,6 +1132,9 @@ function quoteIndex(record) {
 }
 function transactionIndex(network, transaction) {
   return `${network}\0${transaction.toLowerCase()}`;
+}
+function locatorKey(locator) {
+  return locator.kind === "primary" ? `intent\0${locator.intentKey}` : `payment\0${locator.paymentKey}`;
 }
 function cloneRecord(record) {
   return structuredClone(record);
@@ -1074,6 +1158,9 @@ function createIntentExecutor(config) {
     store: config.store,
     async get(intentHash) {
       return config.store.get(intentHash);
+    },
+    async getPayment(paymentNetwork, paymentTransaction) {
+      return config.store.getPayment(paymentNetwork, paymentTransaction);
     },
     async verify(input) {
       return verifyPaidExecutionIntent({
@@ -1119,6 +1206,13 @@ function createIntentExecutor(config) {
         );
       }
       let record = registration.record;
+      if (registration.kind === "duplicate_payment") {
+        if (isTerminalIntentExecutionStatus(record.status)) return record;
+        if (record.status === "refund_pending" || record.status === "refund_failed") {
+          return runRefund(config, record, claimToken);
+        }
+        return record;
+      }
       if (isTerminalIntentExecutionStatus(record.status)) return record;
       if (record.status !== "paid") return record;
       const executionClaimToken = claimToken();
@@ -1330,6 +1424,70 @@ function createIntentExecutor(config) {
       }
       return runRefund(config, record, claimToken);
     },
+    async retryPaymentRefund(paymentNetwork, paymentTransaction) {
+      const record = await config.store.getPayment(
+        paymentNetwork,
+        paymentTransaction
+      );
+      if (!record) {
+        throw new Error("invalid_state: payment record was not found");
+      }
+      if (isTerminalIntentExecutionStatus(record.status)) return record;
+      if (record.status !== "refund_pending" && record.status !== "refund_failed") {
+        return record;
+      }
+      return runRefund(config, record, claimToken);
+    },
+    async recoverPayment(paymentNetwork, paymentTransaction) {
+      const record = await config.store.getPayment(
+        paymentNetwork,
+        paymentTransaction
+      );
+      if (!record) {
+        throw new Error("invalid_state: payment record was not found");
+      }
+      if (!record.duplicatePayment) return record;
+      if (isTerminalIntentExecutionStatus(record.status)) return record;
+      if (record.status === "refund_claimed") {
+        const released = await config.store.transition(
+          paymentTransition(record, {
+            intentHash: record.intentHash,
+            expectedRevision: record.revision,
+            from: "refund_claimed",
+            to: "refund_failed",
+            claimToken: record.claimToken,
+            patch: {
+              claimToken: void 0,
+              failure: safeFailure(
+                "refund_failed",
+                "Refund claim was abandoned before submission and may be retried",
+                true
+              )
+            }
+          })
+        );
+        if (released.kind !== "updated") {
+          return recordFromConflict(released, record);
+        }
+        return runRefund(config, released.record, claimToken);
+      }
+      if (record.status === "refund_submitted") {
+        return markManualIntervention(
+          config.store,
+          record,
+          record.claimToken,
+          safeFailure(
+            "refund_uncertain",
+            "Refund was abandoned after submission began; reconcile before another attempt",
+            false
+          )
+        );
+      }
+      if (record.status === "refund_pending" || record.status === "refund_failed") {
+        return runRefund(config, record, claimToken);
+      }
+      return record;
+    },
     /**
      * Resume an intent abandoned mid-transition, for example by a process
      * crash, using the claim token persisted on the record. Adapters are only
@@ -1486,7 +1644,15 @@ function verifySimulation(record, simulation) {
         false
       );
     }
-    if (BigInt(simulation.gasCost) > BigInt(record.intent.maxGasCost)) {
+    const gasCost = DecimalIntegerStringSchema.safeParse(simulation.gasCost);
+    if (!gasCost.success) {
+      return safeFailure(
+        "simulation_failed",
+        "Simulation returned invalid constraint evidence",
+        false
+      );
+    }
+    if (BigInt(gasCost.data) > BigInt(record.intent.maxGasCost)) {
       return safeFailure(
         "gas_cost_exceeded",
         "Simulated gas cost exceeds the signed maximum",
@@ -1542,24 +1708,28 @@ async function failAndRefund(config, record, executionClaimToken, failure2, crea
 }
 async function runRefund(config, input, createClaimToken) {
   const refundClaimToken = createClaimToken();
-  const claim = await config.store.transition({
-    intentHash: input.intentHash,
-    expectedRevision: input.revision,
-    from: input.status,
-    to: "refund_claimed",
-    patch: {
-      claimToken: refundClaimToken,
-      refundAttempts: input.refundAttempts + 1
-    }
-  });
+  const claim = await config.store.transition(
+    paymentTransition(input, {
+      intentHash: input.intentHash,
+      expectedRevision: input.revision,
+      from: input.status,
+      to: "refund_claimed",
+      patch: {
+        claimToken: refundClaimToken,
+        refundAttempts: input.refundAttempts + 1
+      }
+    })
+  );
   if (claim.kind !== "updated") return recordFromConflict(claim, input);
-  const submitted = await config.store.transition({
-    intentHash: claim.record.intentHash,
-    expectedRevision: claim.record.revision,
-    from: "refund_claimed",
-    to: "refund_submitted",
-    claimToken: refundClaimToken
-  });
+  const submitted = await config.store.transition(
+    paymentTransition(claim.record, {
+      intentHash: claim.record.intentHash,
+      expectedRevision: claim.record.revision,
+      from: "refund_claimed",
+      to: "refund_submitted",
+      claimToken: refundClaimToken
+    })
+  );
   if (submitted.kind !== "updated") {
     return recordFromConflict(submitted, claim.record);
   }
@@ -1569,7 +1739,7 @@ async function runRefund(config, input, createClaimToken) {
     refund = await config.refund({
       intent: record.intent,
       record,
-      idempotencyKey: `${record.intentHash}:refund`
+      idempotencyKey: refundIdempotencyKey(record)
     });
   } catch {
     return markManualIntervention(
@@ -1596,20 +1766,38 @@ async function runRefund(config, input, createClaimToken) {
         )
       );
     }
-    const refunded = await config.store.transition({
-      intentHash: record.intentHash,
-      expectedRevision: record.revision,
-      from: "refund_submitted",
-      to: "refunded",
-      claimToken: refundClaimToken,
-      patch: {
-        claimToken: void 0,
-        refundNetwork: refund.network,
-        refundTransaction: refund.transaction,
-        failure: void 0,
-        metadata: refund.metadata
-      }
-    });
+    if (refund.network !== record.paymentNetwork) {
+      return markManualIntervention(
+        config.store,
+        record,
+        refundClaimToken,
+        safeFailure(
+          "refund_uncertain",
+          "Refund adapter returned a confirmed transaction on the wrong payment network",
+          false
+        ),
+        {
+          refundNetwork: refund.network,
+          refundTransaction: refund.transaction
+        }
+      );
+    }
+    const refunded = await config.store.transition(
+      paymentTransition(record, {
+        intentHash: record.intentHash,
+        expectedRevision: record.revision,
+        from: "refund_submitted",
+        to: "refunded",
+        claimToken: refundClaimToken,
+        patch: {
+          claimToken: void 0,
+          refundNetwork: refund.network,
+          refundTransaction: refund.transaction,
+          failure: void 0,
+          metadata: refund.metadata
+        }
+      })
+    );
     if (refunded.kind === "updated") return refunded.record;
     return markManualAfterStoreConflict(
       config.store,
@@ -1646,21 +1834,23 @@ async function runRefund(config, input, createClaimToken) {
       )
     );
   }
-  const failed = await config.store.transition({
-    intentHash: record.intentHash,
-    expectedRevision: record.revision,
-    from: "refund_submitted",
-    to: "refund_failed",
-    claimToken: refundClaimToken,
-    patch: {
-      claimToken: void 0,
-      failure: safeFailure(
-        "refund_failed",
-        "Refund failed and may be retried explicitly",
-        true
-      )
-    }
-  });
+  const failed = await config.store.transition(
+    paymentTransition(record, {
+      intentHash: record.intentHash,
+      expectedRevision: record.revision,
+      from: "refund_submitted",
+      to: "refund_failed",
+      claimToken: refundClaimToken,
+      patch: {
+        claimToken: void 0,
+        failure: safeFailure(
+          "refund_failed",
+          "Refund failed and may be retried explicitly",
+          true
+        )
+      }
+    })
+  );
   return failed.kind === "updated" ? failed.record : recordFromConflict(failed, record);
 }
 async function markManualAfterStoreConflict(store, record, claimToken, conflict, evidence) {
@@ -1680,23 +1870,35 @@ async function markManualAfterStoreConflict(store, record, claimToken, conflict,
   );
 }
 async function markManualIntervention(store, record, claimToken, failure2, evidence) {
-  const manual = await store.transition({
-    intentHash: record.intentHash,
-    expectedRevision: record.revision,
-    from: record.status,
-    to: "manual_intervention",
-    claimToken,
-    patch: {
-      ...evidence,
-      claimToken: void 0,
-      failure: failure2
-    }
-  });
+  const manual = await store.transition(
+    paymentTransition(record, {
+      intentHash: record.intentHash,
+      expectedRevision: record.revision,
+      from: record.status,
+      to: "manual_intervention",
+      claimToken,
+      patch: {
+        ...evidence,
+        claimToken: void 0,
+        failure: failure2
+      }
+    })
+  );
   if (manual.kind === "updated") return manual.record;
   if (evidence && manual.kind === "conflict" && manual.record.revision === record.revision) {
     return markManualIntervention(store, record, claimToken, failure2);
   }
   return recordFromConflict(manual, record);
+}
+function paymentTransition(record, transition) {
+  return record.duplicatePayment ? {
+    ...transition,
+    paymentNetwork: record.paymentNetwork,
+    paymentTransaction: record.paymentTransaction
+  } : transition;
+}
+function refundIdempotencyKey(record) {
+  return record.duplicatePayment ? `${record.intentHash}:refund:${record.paymentNetwork}:${record.paymentTransaction.toLowerCase()}` : `${record.intentHash}:refund`;
 }
 function safeFailure(reason, message, retryable) {
   return { reason, message, retryable };
@@ -1725,6 +1927,7 @@ export {
   JsonRecordSchema,
   JsonValueSchema,
   NonZeroEvmAddressSchema,
+  PositiveSafeIntegerSchema,
   SignedHyperEvmExecutionIntentSchema,
   TERMINAL_INTENT_EXECUTION_STATUSES,
   UINT256_MAX,

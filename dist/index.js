@@ -263,8 +263,7 @@ var ExactHyperliquidScheme2 = class {
     const destination = action.destination;
     const token = action.token;
     const amount = action.amount;
-    const config = HyperliquidNetworkConfigs[requirements.network];
-    if (!config || action.signatureChainId.toLowerCase() !== config.signatureChainId.toLowerCase() || action.hyperliquidChain !== getHyperliquidChainName(requirements.network)) {
+    if (action.hyperliquidChain !== getHyperliquidChainName(requirements.network)) {
       return {
         isValid: false,
         invalidReason: "invalid_exact_hl_payload_chain_mismatch"
@@ -392,28 +391,33 @@ var ExactHyperliquidScheme2 = class {
           payer
         };
       }
-      await this.submitToExchange(endpoint, exactPayload);
+      let submissionFailed = false;
+      try {
+        await this.submitToExchange(endpoint, exactPayload);
+      } catch {
+        submissionFailed = true;
+      }
       const matchedHash = await this.findConfirmedTransaction(
         infoClient,
         payer,
         exactPayload,
         requirements
       );
-      if (!matchedHash) {
+      if (matchedHash) {
         return {
-          success: false,
-          errorReason: "hl_transfer_not_confirmed",
-          transaction: matchedHash ?? "",
+          success: true,
+          transaction: matchedHash,
           network: requirements.network,
-          payer
+          payer,
+          amount: requirements.amount
         };
       }
       return {
-        success: true,
-        transaction: matchedHash,
+        success: false,
+        errorReason: submissionFailed ? "hl_exchange_error" : "hl_transfer_not_confirmed",
+        transaction: "",
         network: requirements.network,
-        payer,
-        amount: requirements.amount
+        payer
       };
     } catch {
       return {

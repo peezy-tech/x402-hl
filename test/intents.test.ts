@@ -11,10 +11,13 @@ import { keccak256, stringToBytes } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import {
   createIntentDeclaration,
+  createIntentPaymentExtra,
   hashExecutionIntent,
   hashIntentMetadata,
   hashIntentText,
+  hashPaymentRequirements,
   HyperEvmExecutionIntentSchema,
+  IntentPaymentExtraSchema,
   type IntentDeclaration,
   type IntentExecutionStatus,
   normalizeExecutionIntent,
@@ -67,8 +70,10 @@ const OTHER_RECIPIENT = otherAccount.address;
 const CALL_DATA = "0x12345678" as Hex;
 const OTHER_CALL_DATA = "0x87654321" as Hex;
 const PAYMENT_TX = `0x${"22".repeat(32)}`;
+const SECOND_PAYMENT_TX = `0x${"23".repeat(32)}`;
 const EXECUTION_TX = `0x${"33".repeat(32)}`;
 const REFUND_TX = `0x${"44".repeat(32)}`;
+const SECOND_REFUND_TX = `0x${"45".repeat(32)}`;
 const HASH_A = `0x${"aa".repeat(32)}` as Hex;
 const HASH_B = `0x${"bb".repeat(32)}` as Hex;
 
@@ -208,6 +213,37 @@ async function mutatePaymentBinding(
   };
 }
 
+test("createIntentQuote rejects contradictory quote IDs", () => {
+  const input = {
+    id: "quote-authoritative",
+    network: "hyperliquid:testnet" as const,
+    price: "$0.01",
+    payTo: PAY_TO,
+    intent: baseIntent({ quoteId: undefined }) as never,
+  };
+
+  const quote = createIntentQuote(input);
+  assert.equal(quote.id, input.id);
+  assert.equal(quote.intent.quoteId, input.id);
+  assert.equal(quote.declaration.quoteId, input.id);
+  assert.equal(quote.paymentExtra.quoteId, input.id);
+
+  assert.doesNotThrow(() =>
+    createIntentQuote({
+      ...input,
+      intent: baseIntent({ quoteId: input.id }) as never,
+    }),
+  );
+  assert.throws(
+    () =>
+      createIntentQuote({
+        ...input,
+        intent: baseIntent({ quoteId: "quote-contradictory" }) as never,
+      }),
+    /quoteId must match/,
+  );
+});
+
 test("normalization, metadata, and typed-data hashes are deterministic", () => {
   const left = normalizeExecutionIntent(
     baseIntent({
@@ -245,6 +281,43 @@ test("normalization, metadata, and typed-data hashes are deterministic", () => {
   );
   assert.throws(() => stableJson({ invalid: undefined }), /undefined/);
   assert.throws(() => stableJson({ invalid: Number.NaN }), /finite/);
+  assert.throws(() => stableJson(new Array(1)), /Sparse arrays/);
+  assert.throws(() => stableJson([, 1]), /Sparse arrays/);
+  assert.throws(
+    () =>
+      hashPaymentRequirements({
+        scheme: "exact",
+        network: "hyperliquid:testnet",
+        amount: "1",
+        asset: "USDC",
+        payTo: PAY_TO,
+        maxTimeoutSeconds: 60,
+        extra: { sparse: new Array(1) },
+      }),
+    /Sparse arrays/,
+  );
+  assert.throws(
+    () =>
+      normalizeExecutionIntent(
+        baseIntent({
+          metadata: JSON.parse(
+            '{"__proto__":{"flag":true},"visible":1}',
+          ),
+        }) as never,
+      ),
+    /canonical JSON/,
+  );
+  assert.throws(
+    () =>
+      normalizeExecutionIntent(
+        baseIntent({
+          metadata: JSON.parse(
+            '{"nested":{"__proto__":{"flag":true},"visible":1}}',
+          ),
+        }) as never,
+      ),
+    /canonical JSON/,
+  );
 });
 
 test("text commitments hash UTF-8 bytes so 0x-prefixed text cannot collide", () => {
@@ -260,6 +333,39 @@ test("text commitments hash UTF-8 bytes so 0x-prefixed text cannot collide", () 
   assert.notEqual(
     hashExecutionIntent(withTextNonce, { paymentRequirementsHash: HASH_A }),
     hashExecutionIntent(withHexLikeNonce, { paymentRequirementsHash: HASH_A }),
+  );
+
+  const nonce = "nonce-text";
+  const nonceHash = hashIntentText(nonce);
+  const withHashedNonceText = normalizeExecutionIntent(
+    baseIntent({ nonce: nonceHash }) as never,
+  );
+  const withNonceText = normalizeExecutionIntent(
+    baseIntent({ nonce }) as never,
+  );
+  assert.notEqual(
+    hashExecutionIntent(withNonceText, { paymentRequirementsHash: HASH_A }),
+    hashExecutionIntent(withHashedNonceText, {
+      paymentRequirementsHash: HASH_A,
+    }),
+  );
+  assert.notEqual(
+    createIntentPaymentExtra(withNonceText).nonceHash,
+    createIntentPaymentExtra(withHashedNonceText).nonceHash,
+  );
+
+  const quoteId = "quote-text";
+  const withQuoteText = normalizeExecutionIntent(
+    baseIntent({ quoteId }) as never,
+  );
+  const withHashedQuoteText = normalizeExecutionIntent(
+    baseIntent({ quoteId: hashIntentText(quoteId) }) as never,
+  );
+  assert.notEqual(
+    hashExecutionIntent(withQuoteText, { paymentRequirementsHash: HASH_A }),
+    hashExecutionIntent(withHashedQuoteText, {
+      paymentRequirementsHash: HASH_A,
+    }),
   );
 });
 
@@ -709,6 +815,38 @@ test("intent numeric fields beyond uint256 fail closed instead of throwing", asy
     );
   });
 
+  await t.test("schema rejects unsafe chain IDs and deadlines", () => {
+    assert.equal(
+      HyperEvmExecutionIntentSchema.safeParse({
+        ...intent,
+        chainId: Number.MAX_SAFE_INTEGER + 1,
+      }).success,
+      false,
+    );
+    assert.equal(
+      HyperEvmExecutionIntentSchema.safeParse({
+        ...intent,
+        deadline: 1e100,
+      }).success,
+      false,
+    );
+    const paymentExtra = createIntentPaymentExtra(intent);
+    assert.equal(
+      IntentPaymentExtraSchema.safeParse({
+        ...paymentExtra,
+        chainId: Number.MAX_SAFE_INTEGER + 1,
+      }).success,
+      false,
+    );
+    assert.equal(
+      IntentPaymentExtraSchema.safeParse({
+        ...paymentExtra,
+        deadline: 1e100,
+      }).success,
+      false,
+    );
+  });
+
   await t.test("verification fails closed on an overflowing value", async () => {
     const fixture = await makeFixture();
     const result = await verifyPaidExecutionIntent({
@@ -804,13 +942,207 @@ test("sequential duplicate execution returns the terminal receipt", async () => 
   );
 
   const first = await executor.execute(executionInput(fixture));
-  const replay = await executor.execute(executionInput(fixture));
+  const replay = await executor.execute({
+    ...executionInput(fixture),
+    settleResponse: {
+      ...fixture.settleResponse,
+      transaction: PAYMENT_TX.toUpperCase(),
+    },
+  });
 
   assert.equal(first.status, "executed");
   assert.equal(replay.status, "executed");
   assert.equal(replay.intentHash, first.intentHash);
   assert.equal(replay.executionTransaction, EXECUTION_TX);
   assert.equal(executionCalls, 1);
+});
+
+test("a second settled payment for the same intent is durably refunded", async () => {
+  const fixture = await makeFixture();
+  const store = new InMemoryIntentExecutionStore();
+  let executionCalls = 0;
+  const refundedPayments: string[] = [];
+  const refundKeys: string[] = [];
+  const executor = createIntentExecutor(
+    executorConfig(store, {
+      execute: async () => {
+        executionCalls += 1;
+        return {
+          success: true,
+          confirmed: true,
+          transaction: EXECUTION_TX,
+          network: "eip155:998",
+        };
+      },
+      refund: async context => {
+        refundedPayments.push(context.record.paymentTransaction);
+        refundKeys.push(context.idempotencyKey);
+        return {
+          success: true,
+          confirmed: true,
+          transaction: SECOND_REFUND_TX,
+          network: "hyperliquid:testnet",
+        };
+      },
+    }),
+  );
+  const secondPaymentInput = {
+    ...executionInput(fixture),
+    settleResponse: {
+      ...fixture.settleResponse,
+      transaction: SECOND_PAYMENT_TX,
+    },
+  };
+
+  const first = await executor.execute(executionInput(fixture));
+  const duplicate = await executor.execute(secondPaymentInput);
+  const replay = await executor.execute(secondPaymentInput);
+
+  assert.equal(first.status, "executed");
+  assert.equal(first.paymentTransaction, PAYMENT_TX);
+  assert.equal(duplicate.status, "refunded");
+  assert.equal(duplicate.duplicatePayment, true);
+  assert.equal(duplicate.paymentTransaction, SECOND_PAYMENT_TX);
+  assert.equal(duplicate.refundTransaction, SECOND_REFUND_TX);
+  assert.equal(replay.status, "refunded");
+  assert.equal(executionCalls, 1);
+  assert.deepEqual(refundedPayments, [SECOND_PAYMENT_TX]);
+  assert.equal(refundKeys.length, 1);
+  assert.match(refundKeys[0]!, /:refund:hyperliquid:testnet:/);
+
+  const primary = await store.get(first.intentHash);
+  assert.equal(primary?.paymentTransaction, PAYMENT_TX);
+  assert.equal(primary?.status, "executed");
+  const trackedDuplicate = await store.getPayment(
+    "hyperliquid:testnet",
+    SECOND_PAYMENT_TX,
+  );
+  assert.equal(trackedDuplicate?.status, "refunded");
+  assert.equal(trackedDuplicate?.refundTransaction, SECOND_REFUND_TX);
+});
+
+test("a failed duplicate-payment refund retries by payment identity", async () => {
+  const fixture = await makeFixture();
+  let refundCalls = 0;
+  const executor = createIntentExecutor(
+    executorConfig(new InMemoryIntentExecutionStore(), {
+      refund: async () => {
+        refundCalls += 1;
+        if (refundCalls === 1) {
+          return { success: false, retryable: true };
+        }
+        return {
+          success: true,
+          confirmed: true,
+          transaction: SECOND_REFUND_TX,
+          network: "hyperliquid:testnet",
+        };
+      },
+    }),
+  );
+  await executor.execute(executionInput(fixture));
+  const duplicate = await executor.execute({
+    ...executionInput(fixture),
+    settleResponse: {
+      ...fixture.settleResponse,
+      transaction: SECOND_PAYMENT_TX,
+    },
+  });
+  assert.equal(duplicate.status, "refund_failed");
+
+  const retried = await executor.retryPaymentRefund(
+    "hyperliquid:testnet",
+    SECOND_PAYMENT_TX,
+  );
+  assert.equal(retried.status, "refunded");
+  assert.equal(retried.refundTransaction, SECOND_REFUND_TX);
+  assert.equal(refundCalls, 2);
+});
+
+test("refund transaction uniqueness spans primary and duplicate payments", async () => {
+  const fixture = await makeFixture();
+  let refundCalls = 0;
+  const executor = createIntentExecutor(
+    executorConfig(new InMemoryIntentExecutionStore(), {
+      execute: async () => ({ success: false, refundSafe: true }),
+      refund: async () => {
+        refundCalls += 1;
+        return {
+          success: true,
+          confirmed: true,
+          transaction: REFUND_TX,
+          network: "hyperliquid:testnet",
+        };
+      },
+    }),
+  );
+
+  const primary = await executor.execute(executionInput(fixture));
+  const duplicate = await executor.execute({
+    ...executionInput(fixture),
+    settleResponse: {
+      ...fixture.settleResponse,
+      transaction: SECOND_PAYMENT_TX,
+    },
+  });
+
+  assert.equal(primary.status, "refunded");
+  assert.equal(duplicate.status, "manual_intervention");
+  assert.equal(duplicate.failure?.reason, "store_conflict");
+  assert.equal(duplicate.refundTransaction, undefined);
+  assert.equal(refundCalls, 2);
+});
+
+test("concurrent distinct payments execute once and refund the extra payment", async () => {
+  const fixture = await makeFixture();
+  const store = new InMemoryIntentExecutionStore();
+  let executionCalls = 0;
+  let refundCalls = 0;
+  let releaseExecution!: () => void;
+  const gate = new Promise<void>(resolve => {
+    releaseExecution = resolve;
+  });
+  const executor = createIntentExecutor(
+    executorConfig(store, {
+      execute: async () => {
+        executionCalls += 1;
+        await gate;
+        return {
+          success: true,
+          confirmed: true,
+          transaction: EXECUTION_TX,
+          network: "eip155:998",
+        };
+      },
+      refund: async context => {
+        refundCalls += 1;
+        assert.equal(context.record.paymentTransaction, SECOND_PAYMENT_TX);
+        return {
+          success: true,
+          confirmed: true,
+          transaction: SECOND_REFUND_TX,
+          network: "hyperliquid:testnet",
+        };
+      },
+    }),
+  );
+
+  const primary = executor.execute(executionInput(fixture));
+  await new Promise(resolve => setImmediate(resolve));
+  const duplicate = await executor.execute({
+    ...executionInput(fixture),
+    settleResponse: {
+      ...fixture.settleResponse,
+      transaction: SECOND_PAYMENT_TX,
+    },
+  });
+  releaseExecution();
+  const executed = await primary;
+
+  assert.equal(executed.status, "executed");
+  assert.equal(duplicate.status, "refunded");
+  assert.equal(executionCalls, 1);
+  assert.equal(refundCalls, 1);
 });
 
 test("concurrent duplicate execution atomically claims only once", async () => {
@@ -847,6 +1179,42 @@ test("concurrent duplicate execution atomically claims only once", async () => {
   assert.equal(executionCalls, 1);
 });
 
+test("partial payment transition identities cannot target the primary record", async () => {
+  const fixture = await makeFixture();
+  const backing = new InMemoryIntentExecutionStore();
+  let crash = true;
+  const store: IntentExecutionStore = {
+    registerPaid: record => backing.registerPaid(record),
+    get: intentHash => backing.get(intentHash),
+    getPayment: (network, transaction) =>
+      backing.getPayment(network, transaction),
+    transition: transition => {
+      if (crash) {
+        crash = false;
+        throw new Error("stop after registration");
+      }
+      return backing.transition(transition);
+    },
+  };
+  const executor = createIntentExecutor(executorConfig(store));
+  await assert.rejects(
+    executor.execute(executionInput(fixture)),
+    /stop after registration/,
+  );
+  const paid = await backing.get(fixture.signedIntent.intentHash);
+  assert.equal(paid?.status, "paid");
+
+  const malformed = await backing.transition({
+    intentHash: paid!.intentHash,
+    paymentNetwork: paid!.paymentNetwork,
+    expectedRevision: paid!.revision,
+    from: "paid",
+    to: "execution_claimed",
+  } as unknown as IntentExecutionTransition);
+  assert.equal(malformed.kind, "not_found");
+  assert.equal((await backing.get(paid!.intentHash))?.status, "paid");
+});
+
 class SharedTestStore implements IntentExecutionStore {
   constructor(private readonly shared: InMemoryIntentExecutionStore) {}
 
@@ -858,6 +1226,10 @@ class SharedTestStore implements IntentExecutionStore {
 
   get(intentHash: string) {
     return this.shared.get(intentHash);
+  }
+
+  getPayment(paymentNetwork: string, paymentTransaction: string) {
+    return this.shared.getPayment(paymentNetwork, paymentTransaction);
   }
 
   transition(
@@ -924,6 +1296,36 @@ test("definitive execution failure transitions through a successful refund", asy
   assert.equal(receipt.executionAttempts, 1);
   assert.equal(receipt.refundAttempts, 1);
   assert.equal(executionCalls, 1);
+  assert.equal(refundCalls, 1);
+});
+
+test("a confirmed refund on the wrong network requires manual intervention", async () => {
+  const fixture = await makeFixture();
+  let refundCalls = 0;
+  const executor = createIntentExecutor(
+    executorConfig(new InMemoryIntentExecutionStore(), {
+      execute: async () => ({ success: false, refundSafe: true }),
+      refund: async () => {
+        refundCalls += 1;
+        return {
+          success: true,
+          confirmed: true,
+          transaction: REFUND_TX,
+          network: "hyperliquid:mainnet",
+        };
+      },
+    }),
+  );
+
+  const receipt = await executor.execute(executionInput(fixture));
+  assert.equal(receipt.status, "manual_intervention");
+  assert.equal(receipt.failure?.reason, "refund_uncertain");
+  assert.equal(receipt.refundNetwork, "hyperliquid:mainnet");
+  assert.equal(receipt.refundTransaction, REFUND_TX);
+  assert.equal(refundCalls, 1);
+
+  const replay = await executor.retryRefund(receipt.intentHash);
+  assert.equal(replay.status, "manual_intervention");
   assert.equal(refundCalls, 1);
 });
 
@@ -1024,6 +1426,18 @@ test("policy and simulation constraints fail before destination execution", asyn
             { success: true }
           >),
           gasCost: "100001",
+        }),
+      },
+    },
+    {
+      name: "negative gas cost is invalid simulation evidence",
+      overrides: {
+        simulate: context => ({
+          ...(exactSimulation(context) as Extract<
+            IntentSimulationResult,
+            { success: true }
+          >),
+          gasCost: "-1",
         }),
       },
     },
@@ -1290,6 +1704,10 @@ class CrashingStore implements IntentExecutionStore {
     return this.shared.get(intentHash);
   }
 
+  getPayment(paymentNetwork: string, paymentTransaction: string) {
+    return this.shared.getPayment(paymentNetwork, paymentTransaction);
+  }
+
   async transition(
     transition: IntentExecutionTransition,
   ): Promise<IntentStoreTransitionResult> {
@@ -1396,6 +1814,71 @@ test("recover resumes intents abandoned mid-transition by a crash", async t => {
     assert.equal(calls.refund, 1);
   });
 
+  await t.test("an abandoned duplicate-payment refund claim is recovered", async () => {
+    const fixture = await makeFixture();
+    const { store, executor, calls } = crashFixture();
+    await executor.execute(executionInput(fixture));
+
+    store.crashOnTransitionTo = "refund_submitted";
+    await assert.rejects(
+      executor.execute({
+        ...executionInput(fixture),
+        settleResponse: {
+          ...fixture.settleResponse,
+          transaction: SECOND_PAYMENT_TX,
+        },
+      }),
+      /simulated crash/,
+    );
+    const stuck = await store.getPayment(
+      "hyperliquid:testnet",
+      SECOND_PAYMENT_TX,
+    );
+    assert.equal(stuck?.status, "refund_claimed");
+
+    const recovered = await executor.recoverPayment(
+      "hyperliquid:testnet",
+      SECOND_PAYMENT_TX,
+    );
+    assert.equal(recovered.status, "refunded");
+    assert.equal(recovered.duplicatePayment, true);
+    assert.equal(calls.execution, 1);
+    assert.equal(calls.refund, 1);
+  });
+
+  await t.test("an abandoned duplicate-payment refund submission parks only that payment", async () => {
+    const fixture = await makeFixture();
+    const { store, executor, calls } = crashFixture();
+    const primary = await executor.execute(executionInput(fixture));
+
+    store.crashOnTransitionTo = "refunded";
+    await assert.rejects(
+      executor.execute({
+        ...executionInput(fixture),
+        settleResponse: {
+          ...fixture.settleResponse,
+          transaction: SECOND_PAYMENT_TX,
+        },
+      }),
+      /simulated crash/,
+    );
+    const stuck = await store.getPayment(
+      "hyperliquid:testnet",
+      SECOND_PAYMENT_TX,
+    );
+    assert.equal(stuck?.status, "refund_submitted");
+
+    const recovered = await executor.recoverPayment(
+      "hyperliquid:testnet",
+      SECOND_PAYMENT_TX,
+    );
+    assert.equal(recovered.status, "manual_intervention");
+    assert.equal(recovered.failure?.reason, "refund_uncertain");
+    assert.equal((await store.get(primary.intentHash))?.status, "executed");
+    assert.equal(calls.execution, 1);
+    assert.equal(calls.refund, 1);
+  });
+
   await t.test("an abandoned refund submission parks in manual_intervention", async () => {
     const fixture = await makeFixture();
     const { store, executor, calls } = crashFixture({
@@ -1472,6 +1955,8 @@ test("a store conflict on the executed transition preserves the confirmed receip
   const store: IntentExecutionStore = {
     registerPaid: record => backing.registerPaid(record),
     get: intentHash => backing.get(intentHash),
+    getPayment: (network, transaction) =>
+      backing.getPayment(network, transaction),
     async transition(transition) {
       if (transition.to === "executed" && !rejectedExecuted) {
         rejectedExecuted = true;
@@ -1500,6 +1985,8 @@ test("a record still parks manually when the store also rejects the receipt evid
   const store: IntentExecutionStore = {
     registerPaid: record => backing.registerPaid(record),
     get: intentHash => backing.get(intentHash),
+    getPayment: (network, transaction) =>
+      backing.getPayment(network, transaction),
     async transition(transition) {
       if (transition.patch?.executionTransaction) {
         const current = await backing.get(transition.intentHash);
@@ -1527,6 +2014,8 @@ test("a store conflict on the refunded transition preserves the refund receipt",
   const store: IntentExecutionStore = {
     registerPaid: record => backing.registerPaid(record),
     get: intentHash => backing.get(intentHash),
+    getPayment: (network, transaction) =>
+      backing.getPayment(network, transaction),
     async transition(transition) {
       if (transition.to === "refunded" && !rejectedRefunded) {
         rejectedRefunded = true;

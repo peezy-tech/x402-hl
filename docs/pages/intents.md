@@ -234,22 +234,28 @@ interface IntentExecutionStore {
     record: IntentExecutionRecord,
   ): Promise<IntentStoreRegistrationResult>;
   get(intentHash: string): Promise<IntentExecutionRecord | undefined>;
+  getPayment(
+    paymentNetwork: string,
+    paymentTransaction: string,
+  ): Promise<IntentExecutionRecord | undefined>;
   transition(
     transition: IntentExecutionTransition,
   ): Promise<IntentStoreTransitionResult>;
 }
 ```
 
-`registerPaid` must atomically enforce uniqueness for:
+`registerPaid` must atomically enforce uniqueness for the primary intent hash
+and quote, plus every `(paymentNetwork, paymentTransaction)`. If the same signed
+intent arrives with a new settled transaction, registration must durably create
+a refund-only `duplicatePayment` record instead of returning an `intent_hash`
+conflict. Execution and refund transaction identifiers remain globally unique
+across primary and duplicate-payment records.
 
-- intent hash;
-- `(application, gateway, quoteId)`;
-- `(paymentNetwork, paymentTransaction)`;
-- execution and refund transaction identifiers when they are recorded.
-
-`transition` is a compare-and-swap over revision, current status, and claim
-token. Back it with a database transaction and unique indexes. A read followed
-by an unconditional update is not sufficient.
+`transition` is a compare-and-swap over the selected payment identity, revision,
+current status, and claim token. Back it with a database transaction and unique
+indexes. A read followed by an unconditional update is not sufficient. Existing
+store adapters must add `getPayment` and payment-keyed transition support before
+upgrading.
 
 The state machine is:
 
@@ -270,17 +276,19 @@ uncertain execution, uncertain refund, or unreconciled store conflict
   -> manual_intervention
 ```
 
-`executed`, `refunded`, and `manual_intervention` are terminal. A
-`refund_failed` record can be retried explicitly with `retryRefund`. If a
-process crashes while a record holds a claim, `recover(intentHash)` resumes it
+`executed`, `refunded`, and `manual_intervention` are terminal. A primary
+`refund_failed` record can be retried with `retryRefund`; duplicate-payment
+refunds use `retryPaymentRefund`. If a process crashes while a record holds a
+claim, `recover(intentHash)` resumes a primary record and
+`recoverPayment(network, transaction)` resumes a duplicate-payment refund
 using the claim token persisted on the record: adapters are only invoked after
 the matching `*_submitted` transition is durably recorded, so a record
 stranded in `execution_claimed`, `execution_failed`, `refund_pending`,
 `refund_claimed`, or `refund_failed` is driven to a refund, while
 `execution_submitted` and `refund_submitted` park in `manual_intervention` for
-reconciliation. Call `recover` only when no other executor process can still
-be driving the intent — for example on restart after a crash, before resuming
-traffic. `InMemoryIntentExecutionStore` implements the contract for tests and
+reconciliation. Call either recovery method only when no other executor
+process can still be driving the record — for example on restart after a crash,
+before resuming traffic. `InMemoryIntentExecutionStore` implements the contract for tests and
 single-process development only. It is not durable and must not be used as a
 production replay boundary.
 

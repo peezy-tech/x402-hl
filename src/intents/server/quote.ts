@@ -38,9 +38,13 @@ export interface ResolvedIntentQuote {
 }
 
 export function createIntentQuote(input: IntentQuoteInput): ResolvedIntentQuote {
+  if (input.intent.quoteId !== undefined && input.intent.quoteId !== input.id) {
+    throw new Error("Intent quoteId must match the quote id");
+  }
+
   const intent = normalizeExecutionIntent({
     ...input.intent,
-    quoteId: input.intent.quoteId ?? input.id,
+    quoteId: input.id,
   });
   const declaration = createIntentDeclaration(intent);
   const paymentExtra = createIntentPaymentExtra(
