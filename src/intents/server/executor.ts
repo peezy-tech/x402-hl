@@ -785,11 +785,17 @@ async function runRefund(
       },
     });
     if (refunded.kind === "updated") return refunded.record;
+    // Keep the confirmed receipt on the parked record so operators do not
+    // have to re-derive it through the adapter idempotency key.
     return markManualAfterStoreConflict(
       config.store,
       record,
       refundClaimToken,
       refunded,
+      {
+        refundNetwork: refund.network,
+        refundTransaction: refund.transaction,
+      },
     );
   }
 

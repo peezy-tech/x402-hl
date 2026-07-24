@@ -218,11 +218,11 @@ import { SendAssetTypes as SendAssetTypes2 } from "@nktkas/hyperliquid/api/excha
 import { recoverUserFromUserSigned } from "@nktkas/hyperliquid/utils";
 import { getAddress } from "viem";
 var SETTLEMENT_CACHE_TTL_MS = 5 * 60 * 1e3;
-var MATCH_LOOKBACK_MS = 5 * 1e3;
 var MATCH_LOOKAHEAD_MS = 30 * 1e3;
 var MATCH_ATTEMPTS = 5;
 var MATCH_RETRY_DELAY_MS = 500;
 var MAX_CLOCK_SKEW_MS = 30 * 1e3;
+var MATCH_LOOKBACK_MS = MAX_CLOCK_SKEW_MS;
 var MATCH_WINDOW_LATE_GRACE_MS = MAX_CLOCK_SKEW_MS + MATCH_LOOKAHEAD_MS;
 var ExactHyperliquidScheme2 = class {
   scheme = "exact";

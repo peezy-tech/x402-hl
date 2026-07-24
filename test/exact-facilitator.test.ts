@@ -228,3 +228,66 @@ test("facilitator recognizes the public spotTransfer ledger candidate shape", ()
     false,
   );
 });
+
+test("ledger reconciliation finds a transfer when the client clock runs ahead of the exchange", async () => {
+  const payload = await signedPaymentPayload();
+  const inner = payload.payload as { nonce: number };
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as {
+    findConfirmedTransaction(
+      client: unknown,
+      payer: string,
+      payload: unknown,
+      requirements: PaymentRequirements,
+      attempts?: number,
+    ): Promise<string | undefined>;
+    confirmTransaction(...args: unknown[]): Promise<boolean>;
+  };
+  internals.confirmTransaction = async () => true;
+
+  // The nonce is the client's wall clock, which verify accepts up to 30s
+  // ahead of ours; the exchange then records the transfer at its own earlier
+  // time. The query lookback must cover that skew or the settled transfer is
+  // never returned by the ledger API.
+  const transferTime = inner.nonce - 20_000;
+  const hash = `0x${"66".repeat(32)}`;
+  const client = {
+    async userNonFundingLedgerUpdates(args: {
+      startTime: number;
+      endTime?: number;
+    }) {
+      const updates = [
+        {
+          time: transferTime,
+          hash,
+          delta: {
+            type: "spotTransfer",
+            token: "USDC",
+            amount: "0.01",
+            usdcValue: "0.01",
+            user: account.address,
+            destination: PAY_TO,
+            fee: "0",
+            nativeTokenFee: "0",
+            nonce: null,
+            feeToken: "USDC",
+          },
+        },
+      ];
+      return updates.filter(
+        update =>
+          update.time >= args.startTime &&
+          (args.endTime == null || update.time <= args.endTime),
+      );
+    },
+  };
+
+  const found = await internals.findConfirmedTransaction(
+    client,
+    account.address,
+    payload.payload,
+    requirements,
+    1,
+  );
+  assert.equal(found, hash);
+});

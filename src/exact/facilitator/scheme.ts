@@ -23,11 +23,15 @@ import {
 } from "../../utils";
 
 const SETTLEMENT_CACHE_TTL_MS = 5 * 60 * 1000;
-const MATCH_LOOKBACK_MS = 5 * 1000;
 const MATCH_LOOKAHEAD_MS = 30 * 1000;
 const MATCH_ATTEMPTS = 5;
 const MATCH_RETRY_DELAY_MS = 500;
 const MAX_CLOCK_SKEW_MS = 30 * 1000;
+// The nonce is the client's wall clock, which validateTtl accepts up to
+// MAX_CLOCK_SKEW_MS ahead of ours; the exchange ledger timestamp can lag the
+// nonce by the same skew, so the query must look back at least that far or a
+// settled transfer from a fast client clock is never found.
+const MATCH_LOOKBACK_MS = MAX_CLOCK_SKEW_MS;
 // A payment can pass verify() in the last millisecond of its TTL and still
 // take submit plus confirmation latency to appear in the ledger, with the
 // exchange clock skewed relative to ours. The window is only a candidate

@@ -1615,7 +1615,11 @@ async function runRefund(config, input, createClaimToken) {
       config.store,
       record,
       refundClaimToken,
-      refunded
+      refunded,
+      {
+        refundNetwork: refund.network,
+        refundTransaction: refund.transaction
+      }
     );
   }
   if (refund.mayHaveSucceeded) {

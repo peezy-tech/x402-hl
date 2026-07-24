@@ -1519,3 +1519,36 @@ test("a record still parks manually when the store also rejects the receipt evid
   assert.equal(receipt.failure?.reason, "store_conflict");
   assert.equal(receipt.executionTransaction, undefined);
 });
+
+test("a store conflict on the refunded transition preserves the refund receipt", async () => {
+  const fixture = await makeFixture();
+  const backing = new InMemoryIntentExecutionStore();
+  let rejectedRefunded = false;
+  const store: IntentExecutionStore = {
+    registerPaid: record => backing.registerPaid(record),
+    get: intentHash => backing.get(intentHash),
+    async transition(transition) {
+      if (transition.to === "refunded" && !rejectedRefunded) {
+        rejectedRefunded = true;
+        const current = await backing.get(transition.intentHash);
+        return {
+          kind: "conflict",
+          key: "refund_transaction",
+          record: current!,
+        };
+      }
+      return backing.transition(transition);
+    },
+  };
+  const executor = createIntentExecutor(
+    executorConfig(store, {
+      execute: async () => ({ success: false, refundSafe: true }),
+    }),
+  );
+
+  const receipt = await executor.execute(executionInput(fixture));
+  assert.equal(receipt.status, "manual_intervention");
+  assert.equal(receipt.failure?.reason, "store_conflict");
+  assert.equal(receipt.refundTransaction, REFUND_TX);
+  assert.equal(receipt.refundNetwork, "hyperliquid:testnet");
+});
