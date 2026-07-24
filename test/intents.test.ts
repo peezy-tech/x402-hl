@@ -31,6 +31,7 @@ import {
   createIntentQuote,
   InMemoryIntentExecutionStore,
   verifyPaidExecutionIntent,
+  verifyPreSettlementExecutionIntent,
 } from "../src/intents/server/index";
 import type {
   IntentExecutionContext,
@@ -159,6 +160,12 @@ function verificationInput(fixture: Fixture) {
 
 function executionInput(fixture: Fixture) {
   const { expectedDomain: _expectedDomain, ...input } =
+    verificationInput(fixture);
+  return input;
+}
+
+function preSettlementInput(fixture: Fixture) {
+  const { settleResponse: _settleResponse, ...input } =
     verificationInput(fixture);
   return input;
 }
@@ -364,6 +371,88 @@ test("verification rejects an expired intent", async () => {
     now: 101,
   });
   assertFailure(result, "execution_intent_expired");
+});
+
+test("pre-settlement verification accepts a valid intent without settlement", async () => {
+  const fixture = await makeFixture();
+  const result = await verifyPreSettlementExecutionIntent(
+    preSettlementInput(fixture),
+  );
+  if (!result.ok) assert.fail(`${result.reason}: ${result.message}`);
+  assert.equal(result.signer, account.address);
+  assert.equal(result.intentHash, fixture.signedIntent.intentHash);
+  assert.equal(result.intentTemplateHash, fixture.quote.intentTemplateHash);
+});
+
+test("pre-settlement verification rejects unpayable intents before funds move", async t => {
+  const fixture = await makeFixture();
+
+  function expectFailure(
+    result: Awaited<ReturnType<typeof verifyPreSettlementExecutionIntent>>,
+    reason: string,
+  ) {
+    assert.equal(result.ok, false);
+    if (result.ok) assert.fail(`expected ${reason}, received success`);
+    assert.equal(result.reason, reason);
+  }
+
+  await t.test("missing execution intent", async () => {
+    const result = await verifyPreSettlementExecutionIntent({
+      ...preSettlementInput(fixture),
+      paymentPayload: { ...fixture.paymentPayload, extensions: {} },
+    });
+    expectFailure(result, "missing_execution_intent");
+  });
+
+  await t.test("trusted template mismatch", async () => {
+    const result = await verifyPreSettlementExecutionIntent({
+      ...preSettlementInput(fixture),
+      expectedIntentTemplateHash: HASH_B,
+    });
+    expectFailure(result, "intent_template_hash_mismatch");
+  });
+
+  await t.test("payload selected different requirements", async () => {
+    const paymentRequirements = structuredClone(fixture.paymentRequirements);
+    paymentRequirements.amount = "1000001";
+    const result = await verifyPreSettlementExecutionIntent({
+      ...preSettlementInput(fixture),
+      paymentRequirements,
+    });
+    expectFailure(result, "payment_payload_requirements_mismatch");
+  });
+
+  await t.test("expired deadline fails by default", async () => {
+    const expired = await makeFixture({ deadline: 100 });
+    const result = await verifyPreSettlementExecutionIntent({
+      ...preSettlementInput(expired),
+      now: 101,
+    });
+    expectFailure(result, "execution_intent_expired");
+  });
+});
+
+test("executor verifyBeforeSettlement applies its configured domain", async () => {
+  const fixture = await makeFixture();
+  const executor = createIntentExecutor(
+    executorConfig(new InMemoryIntentExecutionStore()),
+  );
+  const { expectedDomain: _expectedDomain, ...input } =
+    preSettlementInput(fixture);
+
+  const result = await executor.verifyBeforeSettlement(input);
+  if (!result.ok) assert.fail(`${result.reason}: ${result.message}`);
+  assert.equal(result.signer, account.address);
+
+  const foreign = createIntentExecutor(
+    executorConfig(new InMemoryIntentExecutionStore(), {
+      domain: { application: DOMAIN.application, gateway: OTHER_GATEWAY },
+    }),
+  );
+  const rejected = await foreign.verifyBeforeSettlement(input);
+  assert.equal(rejected.ok, false);
+  if (rejected.ok) assert.fail("expected gateway_mismatch, received success");
+  assert.equal(rejected.reason, "gateway_mismatch");
 });
 
 test("verification rejects quote, template, and cross-domain replay", async t => {

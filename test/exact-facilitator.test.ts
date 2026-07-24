@@ -102,6 +102,57 @@ test("facilitator verify rejects a malformed cryptographic signature", async () 
   );
 });
 
+type FacilitatorInternals = {
+  findConfirmedTransaction(...args: unknown[]): Promise<string | undefined>;
+  submitToExchange(...args: unknown[]): Promise<unknown>;
+};
+
+test("settle retried after the TTL lapsed still recovers an already-settled payment", async t => {
+  const payload = await signedPaymentPayload();
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as FacilitatorInternals;
+  const confirmedHash = `0x${"55".repeat(32)}`;
+  let submitted = false;
+  internals.findConfirmedTransaction = async () => confirmedHash;
+  internals.submitToExchange = async () => {
+    submitted = true;
+    throw new Error("an expired payment must never be resubmitted");
+  };
+
+  const ttlMs = requirements.maxTimeoutSeconds * 1000;
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() + ttlMs + 60_000 });
+
+  const verification = await facilitator.verify(payload, requirements);
+  assert.equal(verification.isValid, false);
+  assert.equal(verification.invalidReason, "payment_expired");
+
+  const settled = await facilitator.settle(payload, requirements);
+  assert.equal(settled.success, true);
+  assert.equal(settled.transaction, confirmedHash);
+  assert.equal(settled.payer, account.address);
+  assert.equal(submitted, false);
+});
+
+test("settle of an expired payment with no ledger match fails closed without submitting", async t => {
+  const payload = await signedPaymentPayload();
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as FacilitatorInternals;
+  let submitted = false;
+  internals.findConfirmedTransaction = async () => undefined;
+  internals.submitToExchange = async () => {
+    submitted = true;
+    return { status: "ok" };
+  };
+
+  const ttlMs = requirements.maxTimeoutSeconds * 1000;
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() + ttlMs + 60_000 });
+
+  const settled = await facilitator.settle(payload, requirements);
+  assert.equal(settled.success, false);
+  assert.equal(settled.errorReason, "payment_expired");
+  assert.equal(submitted, false);
+});
+
 test("facilitator recognizes the public spotTransfer ledger candidate shape", () => {
   const nonce = Date.now();
   const facilitator = new ExactHyperliquidFacilitator() as unknown as {

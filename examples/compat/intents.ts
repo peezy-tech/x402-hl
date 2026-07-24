@@ -12,6 +12,7 @@ import {
   createIntentExecutor,
   createIntentQuote,
   verifyPaidExecutionIntent,
+  verifyPreSettlementExecutionIntent,
 } from "x402-hl/intents/server";
 
 const HYPERLIQUID_TESTNET = "hyperliquid:testnet" as const;
@@ -102,6 +103,20 @@ const paymentPayload = await client.createPaymentPayload(paymentRequired);
 assert(
   paymentPayload.extensions?.["x402-hl/intents"],
   "payment payload should include a signed execution intent",
+);
+
+const preflight = await verifyPreSettlementExecutionIntent({
+  paymentPayload,
+  paymentRequirements: paymentRequirement,
+  expectedDomain: INTENT_DOMAIN,
+  expectedQuoteId: quote.id,
+  expectedIntentTemplateHash: quote.intentTemplateHash,
+  now: FIXED_NOW_SECONDS,
+});
+assert(preflight.ok, preflight.ok ? "verified" : preflight.message);
+assert(
+  preflight.signer === signer.address,
+  "pre-settlement verification should recover the intent signer",
 );
 
 const settleResponse = {

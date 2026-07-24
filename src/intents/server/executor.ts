@@ -12,10 +12,13 @@ import {
 import type {
   PaidIntentVerificationInput,
   PaidIntentVerificationResult,
+  PreSettlementIntentVerificationInput,
+  PreSettlementIntentVerificationResult,
   VerifiedPaidExecutionIntent,
 } from "./verification";
 import {
   verifyPaidExecutionIntent,
+  verifyPreSettlementExecutionIntent,
 } from "./verification";
 import type {
   IntentExecutionRecord,
@@ -146,6 +149,21 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
       input: Omit<PaidIntentVerificationInput, "expectedDomain">,
     ): Promise<PaidIntentVerificationResult> {
       return verifyPaidExecutionIntent({
+        ...input,
+        expectedDomain: config.domain,
+      });
+    },
+
+    /**
+     * Runs every settlement-independent check so a resource server can reject
+     * an intent that `execute` would refuse to register — missing, malformed,
+     * mismatched, or unsigned — before settling the HyperCore payment and
+     * burning the user's funds.
+     */
+    async verifyBeforeSettlement(
+      input: Omit<PreSettlementIntentVerificationInput, "expectedDomain">,
+    ): Promise<PreSettlementIntentVerificationResult> {
+      return verifyPreSettlementExecutionIntent({
         ...input,
         expectedDomain: config.domain,
       });

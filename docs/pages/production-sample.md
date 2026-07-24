@@ -36,6 +36,7 @@ The gateway is an application-owned broker:
 durable quote + payment id
   -> 402 with finalized payment requirements and intent template
   -> client approves trusted application/gateway and signs payment + intent
+  -> pre-settlement intent verification
   -> HyperCore settlement
   -> strict server verification
   -> durable paid registration
@@ -209,6 +210,13 @@ object. Do not hash a preliminary price configuration or reconstruct
 requirements after settlement.
 
 ## 3. Validate Payment Id, Settlement, And Quote
+
+Before requesting settlement, run `verifyPreSettlementExecutionIntent` (or the
+executor's `verifyBeforeSettlement`) with the same payload, requirements, and
+persisted quote values. A payload that fails those settlement-independent
+checks — a missing, malformed, mismatched, or unsigned intent — must be
+rejected without settling, because it can never be registered or automatically
+refunded afterwards.
 
 The framework-specific request adapter should provide the actual payment
 payload, the exact settled requirements, and the facilitator response. Validate

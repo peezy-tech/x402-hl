@@ -506,8 +506,37 @@ export interface SafeAuditLogger {
 }
 
 /**
- * Called only after an exact payment has settled successfully. `quote` must
- * come from server-owned durable state, never from the client payload.
+ * Called before settling the HyperCore payment. Every settlement-independent
+ * check runs here — intent presence, canonical shape, domain, quote, template
+ * hash, payment-requirements hash, deadline, and signature — so a payment is
+ * never settled for an intent that `executeSettledIntent` would refuse to
+ * register, which would burn the user's funds with no durable record or
+ * automated refund. `quote` must come from server-owned durable state, never
+ * from the client payload.
+ */
+export async function verifyIntentBeforeSettlement(input: {
+  executor: ReturnType<typeof createProductionExecutor>;
+  paymentPayload: PaymentPayload;
+  paymentRequirements: PaymentRequirements;
+  quote: ResolvedIntentQuote;
+  nowSeconds: number;
+}): Promise<void> {
+  const verified = await input.executor.verifyBeforeSettlement({
+    paymentPayload: input.paymentPayload,
+    paymentRequirements: input.paymentRequirements,
+    expectedQuoteId: input.quote.id,
+    expectedIntentTemplateHash: input.quote.intentTemplateHash,
+    now: input.nowSeconds,
+  });
+  if (!verified.ok) {
+    throw new Error(`${verified.reason}: ${verified.message}`);
+  }
+}
+
+/**
+ * Called only after `verifyIntentBeforeSettlement` passed and the exact
+ * payment settled successfully. `quote` must come from server-owned durable
+ * state, never from the client payload.
  */
 export async function executeSettledIntent(input: {
   executor: ReturnType<typeof createProductionExecutor>;

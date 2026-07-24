@@ -125,6 +125,9 @@ var ExactHyperliquidScheme = class {
     return [];
   }
   async verify(payload, requirements) {
+    return this.verifyPayment(payload, requirements, { enforceTtl: true });
+  }
+  async verifyPayment(payload, requirements, options) {
     if (payload.x402Version !== 2) {
       return { isValid: false, invalidReason: "invalid_x402_version" };
     }
@@ -172,7 +175,7 @@ var ExactHyperliquidScheme = class {
     if (!this.validateAmount(amount, requirements.amount, decimals)) {
       return { isValid: false, invalidReason: "invalid_exact_hl_payload_amount_mismatch" };
     }
-    if (!this.validateTtl(action.nonce, requirements.maxTimeoutSeconds)) {
+    if (options.enforceTtl && !this.validateTtl(action.nonce, requirements.maxTimeoutSeconds)) {
       return { isValid: false, invalidReason: "payment_expired" };
     }
     let recoveredPayer;
@@ -197,7 +200,9 @@ var ExactHyperliquidScheme = class {
     return { isValid: true, payer: getAddress(recoveredPayer) };
   }
   async settle(payload, requirements) {
-    const verification = await this.verify(payload, requirements);
+    const verification = await this.verifyPayment(payload, requirements, {
+      enforceTtl: false
+    });
     if (!verification.isValid) {
       return {
         success: false,
@@ -232,7 +237,11 @@ var ExactHyperliquidScheme = class {
     if (cached) return cached;
     const pending = this.pendingSettlements.get(idempotencyKey);
     if (pending) return pending;
-    const settlement = this.settleVerified(exactPayload, requirements, payer).then((response) => {
+    const ttlValid = this.validateTtl(
+      exactPayload.action.nonce,
+      requirements.maxTimeoutSeconds
+    );
+    const settlement = this.settleVerified(exactPayload, requirements, payer, ttlValid).then((response) => {
       if (response.success) {
         this.cacheSettlement(idempotencyKey, response);
       }
@@ -243,7 +252,7 @@ var ExactHyperliquidScheme = class {
     this.pendingSettlements.set(idempotencyKey, settlement);
     return settlement;
   }
-  async settleVerified(exactPayload, requirements, payer) {
+  async settleVerified(exactPayload, requirements, payer, ttlValid) {
     const endpoint = getExchangeBaseUrl(requirements.network);
     const infoClient = createInfoClient(requirements.network);
     try {
@@ -252,7 +261,7 @@ var ExactHyperliquidScheme = class {
         payer,
         exactPayload,
         requirements,
-        1
+        ttlValid ? 1 : MATCH_ATTEMPTS
       );
       if (existingHash) {
         return {
@@ -261,6 +270,15 @@ var ExactHyperliquidScheme = class {
           network: requirements.network,
           payer,
           amount: requirements.amount
+        };
+      }
+      if (!ttlValid) {
+        return {
+          success: false,
+          errorReason: "payment_expired",
+          transaction: "",
+          network: requirements.network,
+          payer
         };
       }
       await this.submitToExchange(endpoint, exactPayload);

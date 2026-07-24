@@ -8,6 +8,7 @@ declare class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     getExtra(_: string): Record<string, unknown> | undefined;
     getSigners(_: string): string[];
     verify(payload: PaymentPayload, requirements: PaymentRequirements): Promise<VerifyResponse>;
+    private verifyPayment;
     settle(payload: PaymentPayload, requirements: PaymentRequirements): Promise<SettleResponse>;
     private settleVerified;
     private submitToExchange;

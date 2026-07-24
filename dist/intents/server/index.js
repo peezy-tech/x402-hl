@@ -653,19 +653,7 @@ function createIntentQuote(input) {
 
 // src/intents/server/verification.ts
 import { getAddress as getAddress4 } from "viem";
-async function verifyPaidExecutionIntent(input) {
-  const settlementFailure = verifySettlement(input);
-  if (settlementFailure) return settlementFailure;
-  const settlement = input.settleResponse;
-  let payer;
-  try {
-    payer = getAddress4(settlement.payer);
-  } catch {
-    return failure(
-      "missing_settled_payer",
-      "Successful settlement must identify a valid EVM payer"
-    );
-  }
+async function verifyPreSettlementExecutionIntent(input) {
   let paymentRequirementsHash;
   let acceptedHash;
   try {
@@ -680,7 +668,7 @@ async function verifyPaidExecutionIntent(input) {
   if (acceptedHash.toLowerCase() !== paymentRequirementsHash.toLowerCase()) {
     return failure(
       "payment_payload_requirements_mismatch",
-      "Payment payload accepted different requirements than the settled payment"
+      "Payment payload accepted different requirements than the server finalized"
     );
   }
   const rawSignedIntent = input.paymentPayload.extensions?.["x402-hl/intents"];
@@ -804,19 +792,38 @@ async function verifyPaidExecutionIntent(input) {
       "Execution intent signature is invalid"
     );
   }
-  if (input.requireSamePayer !== false && payer !== getAddress4(signature.signer)) {
-    return failure(
-      "execution_intent_payer_mismatch",
-      "Execution intent signer does not match the settled Hyperliquid payer"
-    );
-  }
   return {
     ok: true,
     intent,
     intentHash: expectedHash,
     intentTemplateHash,
     paymentRequirementsHash,
-    signer: signature.signer,
+    signer: signature.signer
+  };
+}
+async function verifyPaidExecutionIntent(input) {
+  const settlementFailure = verifySettlement(input);
+  if (settlementFailure) return settlementFailure;
+  const settlement = input.settleResponse;
+  let payer;
+  try {
+    payer = getAddress4(settlement.payer);
+  } catch {
+    return failure(
+      "missing_settled_payer",
+      "Successful settlement must identify a valid EVM payer"
+    );
+  }
+  const verified = await verifyPreSettlementExecutionIntent(input);
+  if (!verified.ok) return verified;
+  if (input.requireSamePayer !== false && payer !== getAddress4(verified.signer)) {
+    return failure(
+      "execution_intent_payer_mismatch",
+      "Execution intent signer does not match the settled Hyperliquid payer"
+    );
+  }
+  return {
+    ...verified,
     payer,
     settlement
   };
@@ -1070,6 +1077,18 @@ function createIntentExecutor(config) {
     },
     async verify(input) {
       return verifyPaidExecutionIntent({
+        ...input,
+        expectedDomain: config.domain
+      });
+    },
+    /**
+     * Runs every settlement-independent check so a resource server can reject
+     * an intent that `execute` would refuse to register — missing, malformed,
+     * mismatched, or unsigned — before settling the HyperCore payment and
+     * burning the user's funds.
+     */
+    async verifyBeforeSettlement(input) {
+      return verifyPreSettlementExecutionIntent({
         ...input,
         expectedDomain: config.domain
       });
@@ -1740,6 +1759,7 @@ export {
   stableJson,
   verifyExecutionIntentSignature,
   verifyIntentPaymentExtra,
-  verifyPaidExecutionIntent
+  verifyPaidExecutionIntent,
+  verifyPreSettlementExecutionIntent
 };
 //# sourceMappingURL=index.js.map

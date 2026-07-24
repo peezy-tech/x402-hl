@@ -29,14 +29,12 @@ interface ResolvedIntentQuote {
 }
 declare function createIntentQuote(input: IntentQuoteInput): ResolvedIntentQuote;
 
-interface PaidIntentVerificationInput {
+interface PreSettlementIntentVerificationInput {
     paymentPayload: PaymentPayload;
     paymentRequirements: PaymentRequirements;
-    settleResponse?: SettleResponse;
     expectedDomain: ExecutionIntentDomain;
     expectedQuoteId: string;
     expectedIntentTemplateHash: Hex | string;
-    requireSamePayer?: boolean;
     now?: number;
     /**
      * When false, an expired deadline alone does not fail verification; every
@@ -46,15 +44,28 @@ interface PaidIntentVerificationInput {
      */
     enforceDeadline?: boolean;
 }
-interface VerifiedPaidExecutionIntent {
+interface PaidIntentVerificationInput extends PreSettlementIntentVerificationInput {
+    settleResponse?: SettleResponse;
+    requireSamePayer?: boolean;
+}
+interface VerifiedPreSettlementExecutionIntent {
     intent: HyperEvmExecutionIntent;
     intentHash: Hex;
     intentTemplateHash: Hex;
     paymentRequirementsHash: Hex;
     signer: Address;
+}
+interface VerifiedPaidExecutionIntent extends VerifiedPreSettlementExecutionIntent {
     payer: Address;
     settlement: SettleResponse;
 }
+type PreSettlementIntentVerificationResult = ({
+    ok: true;
+} & VerifiedPreSettlementExecutionIntent) | {
+    ok: false;
+    reason: IntentFailureReason;
+    message: string;
+};
 type PaidIntentVerificationResult = ({
     ok: true;
 } & VerifiedPaidExecutionIntent) | {
@@ -62,6 +73,15 @@ type PaidIntentVerificationResult = ({
     reason: IntentFailureReason;
     message: string;
 };
+/**
+ * Runs every settlement-independent check — intent presence, canonical shape,
+ * payment-requirements hash, domain, quote, template hash, payment binding,
+ * deadline, and signature — so a resource server can reject an unpayable
+ * intent before settling the HyperCore payment and burning the user's funds.
+ * Settlement-dependent checks (settlement binding and payer/signer equality)
+ * still require `verifyPaidExecutionIntent` after settlement.
+ */
+declare function verifyPreSettlementExecutionIntent(input: PreSettlementIntentVerificationInput): Promise<PreSettlementIntentVerificationResult>;
 declare function verifyPaidExecutionIntent(input: PaidIntentVerificationInput): Promise<PaidIntentVerificationResult>;
 declare function assertPaidExecutionIntent(input: PaidIntentVerificationInput): Promise<VerifiedPaidExecutionIntent>;
 
@@ -431,6 +451,13 @@ declare function createIntentExecutor(config: IntentExecutorConfig): {
     get(intentHash: string): Promise<IntentExecutionRecord | undefined>;
     verify(input: Omit<PaidIntentVerificationInput, "expectedDomain">): Promise<PaidIntentVerificationResult>;
     /**
+     * Runs every settlement-independent check so a resource server can reject
+     * an intent that `execute` would refuse to register — missing, malformed,
+     * mismatched, or unsigned — before settling the HyperCore payment and
+     * burning the user's funds.
+     */
+    verifyBeforeSettlement(input: Omit<PreSettlementIntentVerificationInput, "expectedDomain">): Promise<PreSettlementIntentVerificationResult>;
+    /**
      * Deadline enforcement is deferred to the state machine rather than
      * pre-registration verification: a payment can settle after the signed
      * deadline lapses, and throwing at that point would leave the settled
@@ -451,4 +478,4 @@ declare function createIntentExecutor(config: IntentExecutorConfig): {
     recover(intentHash: string): Promise<IntentExecutionRecord>;
 };
 
-export { ExecutionIntentDomain, HyperEvmExecutionIntent, HyperEvmExecutionIntentInput, InMemoryIntentExecutionStore, IntentDeclaration, type IntentExecutionContext, IntentExecutionReceipt, type IntentExecutionRecord, IntentExecutionRecordSchema, type IntentExecutionResult, IntentExecutionStatus, type IntentExecutionStore, type IntentExecutionTransition, type IntentExecutionTransitionPatch, type IntentExecutorConfig, IntentFailureReason, IntentPaymentExtra, type IntentPolicyDecision, type IntentQuoteInput, type IntentRefundContext, type IntentRefundResult, type IntentSimulationResult, IntentStoreConflictError, type IntentStoreConflictKey, type IntentStoreRegistrationResult, type IntentStoreTransitionResult, JsonValue, type PaidIntentVerificationInput, type PaidIntentVerificationResult, type ResolvedIntentQuote, type VerifiedPaidExecutionIntent, assertPaidExecutionIntent, createIntentExecutor, createIntentQuote, isLegalIntentExecutionTransition, verifyPaidExecutionIntent };
+export { ExecutionIntentDomain, HyperEvmExecutionIntent, HyperEvmExecutionIntentInput, InMemoryIntentExecutionStore, IntentDeclaration, type IntentExecutionContext, IntentExecutionReceipt, type IntentExecutionRecord, IntentExecutionRecordSchema, type IntentExecutionResult, IntentExecutionStatus, type IntentExecutionStore, type IntentExecutionTransition, type IntentExecutionTransitionPatch, type IntentExecutorConfig, IntentFailureReason, IntentPaymentExtra, type IntentPolicyDecision, type IntentQuoteInput, type IntentRefundContext, type IntentRefundResult, type IntentSimulationResult, IntentStoreConflictError, type IntentStoreConflictKey, type IntentStoreRegistrationResult, type IntentStoreTransitionResult, JsonValue, type PaidIntentVerificationInput, type PaidIntentVerificationResult, type PreSettlementIntentVerificationInput, type PreSettlementIntentVerificationResult, type ResolvedIntentQuote, type VerifiedPaidExecutionIntent, type VerifiedPreSettlementExecutionIntent, assertPaidExecutionIntent, createIntentExecutor, createIntentQuote, isLegalIntentExecutionTransition, verifyPaidExecutionIntent, verifyPreSettlementExecutionIntent };

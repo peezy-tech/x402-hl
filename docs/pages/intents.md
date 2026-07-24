@@ -17,6 +17,8 @@ create and persist quote
   -> advertise x402 PaymentRequirements + intent template
   -> client approves the application/gateway domain
   -> client signs the exact finalized PaymentRequirements hash + intent
+  -> verify the intent, domain, quote, template, payment hash, and signature
+     before settlement
   -> settle the HyperCore payment
   -> verify settlement, domain, quote, template, payment hash, and signer
   -> atomically register the paid intent in a durable store
@@ -148,11 +150,47 @@ intent-free payment option must declare the intent with
 intent only when the selected requirement carries the `x402HlIntent`
 commitment and otherwise sends a normal payment without one.
 
-## Verify Only After Settlement
+## Verify Before Settlement
 
-`verifyPaidExecutionIntent` requires a successful settlement with a payer,
-transaction identifier, and matching network. It also requires locally trusted
-domain, quote id, and template hash values:
+Settlement moves the user's funds, so run every settlement-independent check
+first. `verifyPreSettlementExecutionIntent` verifies intent presence, canonical
+shape, the payment-requirements hash, domain, quote id, template hash, payment
+binding, deadline, and signature without a settlement response. A payment
+payload that fails here — for example a client that never attached a signed
+intent — must be rejected before settling, because `execute` refuses to
+register such a payload after settlement and the settled payment would have no
+durable record and no automated refund:
+
+```ts
+import {
+  verifyPreSettlementExecutionIntent,
+} from "x402-hl/intents/server";
+
+const preflight = await verifyPreSettlementExecutionIntent({
+  paymentPayload,
+  paymentRequirements,
+  expectedDomain: intentDomain,
+  expectedQuoteId: persistedQuote.id,
+  expectedIntentTemplateHash: persistedQuote.intentTemplateHash,
+});
+
+if (!preflight.ok) {
+  throw new Error(`${preflight.reason}: ${preflight.message}`);
+}
+
+const settleResponse = await settleHyperCorePayment();
+```
+
+An executor exposes the same check as `verifyBeforeSettlement`, using its
+configured domain. Passing this check authorizes settlement, not execution:
+the settlement-dependent checks below still run afterwards.
+
+## Verify Again After Settlement
+
+`verifyPaidExecutionIntent` runs the same checks plus the settlement-dependent
+ones. It requires a successful settlement with a payer, transaction
+identifier, and matching network, and it also requires locally trusted domain,
+quote id, and template hash values:
 
 ```ts
 import {
@@ -343,7 +381,7 @@ In addition to every common export:
 | Group | Public exports |
 | --- | --- |
 | Quote | `IntentQuoteInput`, `ResolvedIntentQuote`, `createIntentQuote` |
-| Verification | `PaidIntentVerificationInput`, `VerifiedPaidExecutionIntent`, `PaidIntentVerificationResult`, `verifyPaidExecutionIntent`, `assertPaidExecutionIntent` |
+| Verification | `PreSettlementIntentVerificationInput`, `VerifiedPreSettlementExecutionIntent`, `PreSettlementIntentVerificationResult`, `verifyPreSettlementExecutionIntent`, `PaidIntentVerificationInput`, `VerifiedPaidExecutionIntent`, `PaidIntentVerificationResult`, `verifyPaidExecutionIntent`, `assertPaidExecutionIntent` |
 | Durable store | `IntentExecutionRecordSchema`, `IntentExecutionRecord`, `IntentStoreConflictKey`, `IntentStoreRegistrationResult`, `IntentExecutionTransitionPatch`, `IntentExecutionTransition`, `IntentStoreTransitionResult`, `IntentExecutionStore`, `InMemoryIntentExecutionStore`, `isLegalIntentExecutionTransition` |
 | Executor types | `IntentExecutionContext`, `IntentPolicyDecision`, `IntentSimulationResult`, `IntentExecutionResult`, `IntentRefundContext`, `IntentRefundResult`, `IntentExecutorConfig` |
 | Executor runtime | `IntentStoreConflictError`, `createIntentExecutor` |

@@ -20,14 +20,12 @@ import {
 } from "../typed-data";
 import { verifyExecutionIntentSignature } from "../signature";
 
-export interface PaidIntentVerificationInput {
+export interface PreSettlementIntentVerificationInput {
   paymentPayload: PaymentPayload;
   paymentRequirements: PaymentRequirements;
-  settleResponse?: SettleResponse;
   expectedDomain: ExecutionIntentDomain;
   expectedQuoteId: string;
   expectedIntentTemplateHash: Hex | string;
-  requireSamePayer?: boolean;
   now?: number;
   /**
    * When false, an expired deadline alone does not fail verification; every
@@ -38,15 +36,33 @@ export interface PaidIntentVerificationInput {
   enforceDeadline?: boolean;
 }
 
-export interface VerifiedPaidExecutionIntent {
+export interface PaidIntentVerificationInput
+  extends PreSettlementIntentVerificationInput {
+  settleResponse?: SettleResponse;
+  requireSamePayer?: boolean;
+}
+
+export interface VerifiedPreSettlementExecutionIntent {
   intent: HyperEvmExecutionIntent;
   intentHash: Hex;
   intentTemplateHash: Hex;
   paymentRequirementsHash: Hex;
   signer: Address;
+}
+
+export interface VerifiedPaidExecutionIntent
+  extends VerifiedPreSettlementExecutionIntent {
   payer: Address;
   settlement: SettleResponse;
 }
+
+export type PreSettlementIntentVerificationResult =
+  | ({ ok: true } & VerifiedPreSettlementExecutionIntent)
+  | {
+      ok: false;
+      reason: IntentFailureReason;
+      message: string;
+    };
 
 export type PaidIntentVerificationResult =
   | ({ ok: true } & VerifiedPaidExecutionIntent)
@@ -56,23 +72,17 @@ export type PaidIntentVerificationResult =
       message: string;
     };
 
-export async function verifyPaidExecutionIntent(
-  input: PaidIntentVerificationInput,
-): Promise<PaidIntentVerificationResult> {
-  const settlementFailure = verifySettlement(input);
-  if (settlementFailure) return settlementFailure;
-  const settlement = input.settleResponse as SettleResponse;
-
-  let payer: Address;
-  try {
-    payer = getAddress(settlement.payer as string);
-  } catch {
-    return failure(
-      "missing_settled_payer",
-      "Successful settlement must identify a valid EVM payer",
-    );
-  }
-
+/**
+ * Runs every settlement-independent check — intent presence, canonical shape,
+ * payment-requirements hash, domain, quote, template hash, payment binding,
+ * deadline, and signature — so a resource server can reject an unpayable
+ * intent before settling the HyperCore payment and burning the user's funds.
+ * Settlement-dependent checks (settlement binding and payer/signer equality)
+ * still require `verifyPaidExecutionIntent` after settlement.
+ */
+export async function verifyPreSettlementExecutionIntent(
+  input: PreSettlementIntentVerificationInput,
+): Promise<PreSettlementIntentVerificationResult> {
   let paymentRequirementsHash: Hex;
   let acceptedHash: Hex;
   try {
@@ -87,7 +97,7 @@ export async function verifyPaidExecutionIntent(
   if (acceptedHash.toLowerCase() !== paymentRequirementsHash.toLowerCase()) {
     return failure(
       "payment_payload_requirements_mismatch",
-      "Payment payload accepted different requirements than the settled payment",
+      "Payment payload accepted different requirements than the server finalized",
     );
   }
 
@@ -239,9 +249,39 @@ export async function verifyPaidExecutionIntent(
     );
   }
 
+  return {
+    ok: true,
+    intent,
+    intentHash: expectedHash,
+    intentTemplateHash,
+    paymentRequirementsHash,
+    signer: signature.signer,
+  };
+}
+
+export async function verifyPaidExecutionIntent(
+  input: PaidIntentVerificationInput,
+): Promise<PaidIntentVerificationResult> {
+  const settlementFailure = verifySettlement(input);
+  if (settlementFailure) return settlementFailure;
+  const settlement = input.settleResponse as SettleResponse;
+
+  let payer: Address;
+  try {
+    payer = getAddress(settlement.payer as string);
+  } catch {
+    return failure(
+      "missing_settled_payer",
+      "Successful settlement must identify a valid EVM payer",
+    );
+  }
+
+  const verified = await verifyPreSettlementExecutionIntent(input);
+  if (!verified.ok) return verified;
+
   if (
     input.requireSamePayer !== false &&
-    payer !== getAddress(signature.signer)
+    payer !== getAddress(verified.signer)
   ) {
     return failure(
       "execution_intent_payer_mismatch",
@@ -250,12 +290,7 @@ export async function verifyPaidExecutionIntent(
   }
 
   return {
-    ok: true,
-    intent,
-    intentHash: expectedHash,
-    intentTemplateHash,
-    paymentRequirementsHash,
-    signer: signature.signer,
+    ...verified,
     payer,
     settlement,
   };
@@ -320,6 +355,6 @@ function verifySettlement(
 function failure(
   reason: IntentFailureReason,
   message: string,
-): PaidIntentVerificationResult {
+): { ok: false; reason: IntentFailureReason; message: string } {
   return { ok: false, reason, message };
 }

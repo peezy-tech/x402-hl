@@ -65,6 +65,14 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     payload: PaymentPayload,
     requirements: PaymentRequirements,
   ): Promise<VerifyResponse> {
+    return this.verifyPayment(payload, requirements, { enforceTtl: true });
+  }
+
+  private async verifyPayment(
+    payload: PaymentPayload,
+    requirements: PaymentRequirements,
+    options: { enforceTtl: boolean },
+  ): Promise<VerifyResponse> {
     if (payload.x402Version !== 2) {
       return { isValid: false, invalidReason: "invalid_x402_version" };
     }
@@ -126,7 +134,10 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
       return { isValid: false, invalidReason: "invalid_exact_hl_payload_amount_mismatch" };
     }
 
-    if (!this.validateTtl(action.nonce, requirements.maxTimeoutSeconds)) {
+    if (
+      options.enforceTtl &&
+      !this.validateTtl(action.nonce, requirements.maxTimeoutSeconds)
+    ) {
       return { isValid: false, invalidReason: "payment_expired" };
     }
 
@@ -161,7 +172,14 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     payload: PaymentPayload,
     requirements: PaymentRequirements,
   ): Promise<SettleResponse> {
-    const verification = await this.verify(payload, requirements);
+    // TTL is enforced after ledger reconciliation instead of up front: a
+    // settle retry can arrive after the payment TTL lapsed (for example when
+    // the process crashed between on-chain confirmation and recording the
+    // response), and rejecting it here would permanently report an
+    // already-settled payment as payment_expired.
+    const verification = await this.verifyPayment(payload, requirements, {
+      enforceTtl: false,
+    });
     if (!verification.isValid) {
       return {
         success: false,
@@ -199,7 +217,11 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     const pending = this.pendingSettlements.get(idempotencyKey);
     if (pending) return pending;
 
-    const settlement = this.settleVerified(exactPayload, requirements, payer)
+    const ttlValid = this.validateTtl(
+      exactPayload.action.nonce,
+      requirements.maxTimeoutSeconds,
+    );
+    const settlement = this.settleVerified(exactPayload, requirements, payer, ttlValid)
       .then(response => {
         if (response.success) {
           this.cacheSettlement(idempotencyKey, response);
@@ -218,6 +240,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     exactPayload: ExactHyperliquidPayload,
     requirements: PaymentRequirements,
     payer: string,
+    ttlValid: boolean,
   ): Promise<SettleResponse> {
     const endpoint = getExchangeBaseUrl(requirements.network as any);
     const infoClient = createInfoClient(requirements.network as any);
@@ -227,12 +250,15 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
       // replay an already-settled signed action. A fresh payment has nothing
       // to reconcile, so a single lookup keeps the happy path fast; the
       // retried polling only belongs in the post-submit confirmation below.
+      // An expired payment is reconciliation's last chance to recover a
+      // transfer that confirmed before a crash, so it gets the full retry
+      // budget instead.
       const existingHash = await this.findConfirmedTransaction(
         infoClient,
         payer,
         exactPayload,
         requirements,
-        1,
+        ttlValid ? 1 : MATCH_ATTEMPTS,
       );
       if (existingHash) {
         return {
@@ -241,6 +267,16 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
           network: requirements.network,
           payer,
           amount: requirements.amount,
+        };
+      }
+
+      if (!ttlValid) {
+        return {
+          success: false,
+          errorReason: "payment_expired",
+          transaction: "",
+          network: requirements.network,
+          payer,
         };
       }
 
