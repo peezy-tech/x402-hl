@@ -1,12 +1,11 @@
-import { SendAssetTypes } from "@nktkas/hyperliquid/api/exchange";
 import type {
   PaymentPayload,
   PaymentRequirements,
   SettleResponse,
 } from "@x402/core/types";
 import type { Address, Hex } from "viem";
-import { getAddress, recoverTypedDataAddress } from "viem";
-import { ExactHyperliquidPayloadSchema } from "../../types";
+import { getAddress } from "viem";
+import { verifyExactHyperliquidPayment } from "../../exact/facilitator/verification";
 import {
   ExecutionIntentDomain,
   ExecutionIntentDomainSchema,
@@ -257,33 +256,36 @@ export async function verifyPreSettlementExecutionIntent(
     );
   }
 
+  const paymentVerification = await verifyExactHyperliquidPayment(
+    input.paymentPayload,
+    input.paymentRequirements,
+    { allowExpired: false },
+  );
+  if (!paymentVerification.isValid) {
+    if (
+      paymentVerification.invalidReason === "invalid_exact_hl_payload" ||
+      paymentVerification.invalidReason === "invalid_exact_hl_payload_signature" ||
+      paymentVerification.invalidReason ===
+        "invalid_exact_hl_payload_signer_mismatch"
+    ) {
+      return failure(
+        "malformed_extension_payload",
+        "Hyperliquid payment payload does not contain a valid payer signature",
+      );
+    }
+    return failure(
+      "payment_payload_requirements_mismatch",
+      "Signed Hyperliquid payment action does not satisfy the finalized requirements",
+    );
+  }
+
   let paymentPayer: Address;
   try {
-    const parsedPayment = ExactHyperliquidPayloadSchema.parse(
-      input.paymentPayload.payload,
-    );
-    const recoveredPayer = await recoverTypedDataAddress({
-      domain: {
-        name: "HyperliquidSignTransaction",
-        version: "1",
-        chainId: Number.parseInt(parsedPayment.action.signatureChainId),
-        verifyingContract: "0x0000000000000000000000000000000000000000",
-      },
-      types: SendAssetTypes,
-      primaryType: "HyperliquidTransaction:SendAsset",
-      message: parsedPayment.action,
-      signature: {
-        r: parsedPayment.signature.r as Hex,
-        s: parsedPayment.signature.s as Hex,
-        yParity: parsedPayment.signature.v - 27,
-      },
-    });
-    paymentPayer = getAddress(recoveredPayer);
-    if (paymentPayer !== getAddress(parsedPayment.user)) throw new Error();
+    paymentPayer = getAddress(paymentVerification.payer as string);
   } catch {
     return failure(
       "malformed_extension_payload",
-      "Hyperliquid payment payload does not contain a valid payer signature",
+      "Hyperliquid payment verification did not identify a valid payer",
     );
   }
   if (

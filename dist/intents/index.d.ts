@@ -27,7 +27,7 @@ declare const NonZeroEvmAddressSchema: z.ZodEffects<z.ZodString, string, string>
  */
 declare const UINT256_MAX: bigint;
 declare const DecimalIntegerStringSchema: z.ZodEffects<z.ZodString, string, string>;
-declare const IntentApplicationSchema: z.ZodEffects<z.ZodString, string, string>;
+declare const IntentApplicationSchema: z.ZodString;
 declare const PositiveSafeIntegerSchema: z.ZodNumber;
 type JsonValue = null | boolean | number | string | JsonValue[] | {
     [key: string]: JsonValue;
@@ -43,7 +43,7 @@ type IntentExecutionMode = z.infer<typeof IntentExecutionModeSchema>;
  * `gateway` is also used as the EIP-712 verifying contract value.
  */
 declare const ExecutionIntentDomainSchema: z.ZodObject<{
-    application: z.ZodEffects<z.ZodString, string, string>;
+    application: z.ZodString;
     gateway: z.ZodEffects<z.ZodString, string, string>;
 }, "strip", z.ZodTypeAny, {
     application: string;
@@ -55,7 +55,7 @@ declare const ExecutionIntentDomainSchema: z.ZodObject<{
 type ExecutionIntentDomain = z.infer<typeof ExecutionIntentDomainSchema>;
 declare const HyperEvmExecutionIntentSchema: z.ZodObject<{
     version: z.ZodLiteral<2>;
-    application: z.ZodEffects<z.ZodString, string, string>;
+    application: z.ZodString;
     gateway: z.ZodEffects<z.ZodString, string, string>;
     user: z.ZodString;
     chainId: z.ZodNumber;
@@ -113,7 +113,7 @@ type HyperEvmExecutionIntentInput = Omit<HyperEvmExecutionIntent, "version" | "c
 declare const SignedHyperEvmExecutionIntentSchema: z.ZodObject<{
     intent: z.ZodObject<{
         version: z.ZodLiteral<2>;
-        application: z.ZodEffects<z.ZodString, string, string>;
+        application: z.ZodString;
         gateway: z.ZodEffects<z.ZodString, string, string>;
         user: z.ZodString;
         chainId: z.ZodNumber;
@@ -226,7 +226,7 @@ declare const IntentDeclarationSchema: z.ZodObject<{
     mode: z.ZodLiteral<"brokered">;
     intent: z.ZodObject<{
         version: z.ZodLiteral<2>;
-        application: z.ZodEffects<z.ZodString, string, string>;
+        application: z.ZodString;
         gateway: z.ZodEffects<z.ZodString, string, string>;
         user: z.ZodString;
         chainId: z.ZodNumber;
@@ -421,7 +421,7 @@ declare const IntentExecutionReceiptSchema: z.ZodObject<{
     intentTemplateHash: z.ZodString;
     paymentRequirementsHash: z.ZodString;
     quoteId: z.ZodEffects<z.ZodString, string, string>;
-    application: z.ZodEffects<z.ZodString, string, string>;
+    application: z.ZodString;
     gateway: z.ZodString;
     payer: z.ZodString;
     paymentScheme: z.ZodString;

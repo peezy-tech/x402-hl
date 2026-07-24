@@ -44,6 +44,10 @@ export function canonicalizePaymentRequirements(
   requirements: PaymentRequirements,
 ): CanonicalPaymentRequirements {
   const parsed = PaymentRequirementsV2Schema.parse(requirements);
+  const extra =
+    requirements.extra == null
+      ? {}
+      : Object.fromEntries(Object.entries(requirements.extra));
   const canonical: CanonicalPaymentRequirements = {
     scheme: parsed.scheme,
     network: parsed.network,
@@ -51,7 +55,7 @@ export function canonicalizePaymentRequirements(
     amount: parsed.amount,
     payTo: parsed.payTo,
     maxTimeoutSeconds: parsed.maxTimeoutSeconds,
-    extra: parsed.extra ?? {},
+    extra,
   };
 
   // Validate JSON portability before signing.

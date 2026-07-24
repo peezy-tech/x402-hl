@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { SendAssetTypes } from "@nktkas/hyperliquid/api/exchange";
+import { signUserSignedAction } from "@nktkas/hyperliquid/signing";
 import type {
   PaymentPayload,
   PaymentRequired,
@@ -11,6 +13,7 @@ import { keccak256, stringToBytes } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { ExactHyperliquidScheme as ExactHyperliquidClient } from "../src/exact/client/index";
 import {
+  canonicalizePaymentRequirements,
   createIntentDeclaration,
   createIntentPaymentExtra,
   hashExecutionIntent,
@@ -18,6 +21,7 @@ import {
   hashIntentText,
   hashPaymentRequirements,
   HyperEvmExecutionIntentSchema,
+  IntentApplicationSchema,
   IntentPaymentExtraSchema,
   JsonRecordSchema,
   JsonValueSchema,
@@ -219,6 +223,30 @@ async function mutatePaymentBinding(
   };
 }
 
+async function resignPaymentPayload(
+  payload: PaymentPayload,
+  mutate: (exact: {
+    action: Parameters<typeof signUserSignedAction>[0]["action"] &
+      Record<string, unknown>;
+    nonce: number;
+  }) => void,
+): Promise<PaymentPayload> {
+  const resigned = structuredClone(payload);
+  const exact = resigned.payload as {
+    action: Parameters<typeof signUserSignedAction>[0]["action"] &
+      Record<string, unknown>;
+    signature: unknown;
+    nonce: number;
+  };
+  mutate(exact);
+  exact.signature = await signUserSignedAction({
+    wallet: account,
+    action: exact.action,
+    types: SendAssetTypes,
+  });
+  return resigned;
+}
+
 test("createIntentQuote rejects contradictory quote IDs", () => {
   const input = {
     id: "quote-authoritative",
@@ -302,6 +330,28 @@ test("normalization, metadata, and typed-data hashes are deterministic", () => {
       }),
     /Sparse arrays/,
   );
+
+  const protoPolicyA = {
+    scheme: "exact",
+    network: "hyperliquid:testnet",
+    amount: "1",
+    asset: "USDC",
+    payTo: PAY_TO,
+    maxTimeoutSeconds: 60,
+    extra: JSON.parse('{"__proto__":{"policy":"A"}}'),
+  } satisfies PaymentRequirements;
+  const protoPolicyB = {
+    ...protoPolicyA,
+    extra: JSON.parse('{"__proto__":{"policy":"B"}}'),
+  } satisfies PaymentRequirements;
+  const canonical = canonicalizePaymentRequirements(protoPolicyA);
+  assert.equal(Object.hasOwn(canonical.extra, "__proto__"), true);
+  assert.equal(Object.getPrototypeOf(canonical.extra), Object.prototype);
+  assert.notEqual(
+    hashPaymentRequirements(protoPolicyA),
+    hashPaymentRequirements(protoPolicyB),
+  );
+
   assert.throws(
     () =>
       normalizeExecutionIntent(
@@ -386,6 +436,14 @@ test("deep metadata fails closed without overflowing the verifier stack", async 
   assert.equal(result.ok, false);
   if (result.ok) assert.fail("expected malformed metadata to fail");
   assert.equal(result.reason, "malformed_extension_payload");
+});
+
+test("application schema preserves ZodString helpers and rejects malformed Unicode", () => {
+  const limitedApplication = IntentApplicationSchema.max(64);
+  assert.equal(limitedApplication.parse(" example.😀 "), "example.😀");
+  assert.equal(IntentApplicationSchema.safeParse("\ud800").success, false);
+  assert.equal(IntentApplicationSchema.safeParse("\udc00").success, false);
+  assert.equal(IntentApplicationSchema.safeParse("\udc00\ud800").success, false);
 });
 
 test("text commitments hash UTF-8 bytes so 0x-prefixed text cannot collide", () => {
@@ -479,7 +537,7 @@ test("a rejected signing request is not retried", async () => {
         account: account.address,
         async signTypedData(parameters) {
           calls += 1;
-          assert.equal(parameters.account, account.address);
+          assert.equal("account" in parameters, false);
           throw rejection;
         },
       },
@@ -488,6 +546,55 @@ test("a rejected signing request is not retried", async () => {
     error => error === rejection,
   );
   assert.equal(calls, 1);
+});
+
+test("a bound signing adapter receives account-free typed data", async () => {
+  const fixture = await makeFixture();
+  let calls = 0;
+  const signed = await signExecutionIntent(
+    fixture.quote.intent,
+    {
+      account: account.address,
+      async signTypedData(parameters) {
+        calls += 1;
+        if ("account" in parameters) {
+          throw new Error("unexpected account parameter");
+        }
+        return account.signTypedData(parameters);
+      },
+    },
+    { paymentRequirements: fixture.paymentRequirements },
+  );
+
+  assert.equal(calls, 1);
+  assert.equal((await verifyExecutionIntentSignature(signed)).valid, true);
+});
+
+test("signing retries with account only after an account-not-found error", async () => {
+  const fixture = await makeFixture();
+  let calls = 0;
+  const signed = await signExecutionIntent(
+    fixture.quote.intent,
+    {
+      account: account.address,
+      async signTypedData(parameters) {
+        calls += 1;
+        if (calls === 1) {
+          assert.equal("account" in parameters, false);
+          const missingAccount = new Error("Could not find an Account");
+          missingAccount.name = "AccountNotFoundError";
+          throw missingAccount;
+        }
+        assert.equal(parameters.account, account.address);
+        const { account: _account, ...typedData } = parameters;
+        return account.signTypedData(typedData);
+      },
+    },
+    { paymentRequirements: fixture.paymentRequirements },
+  );
+
+  assert.equal(calls, 2);
+  assert.equal((await verifyExecutionIntentSignature(signed)).valid, true);
 });
 
 test("signing rejects mismatched declared and configured signer accounts", async () => {
@@ -721,6 +828,51 @@ test("pre-settlement verification rejects unpayable intents before funds move", 
       paymentRequirements,
     });
     expectFailure(result, "payment_payload_requirements_mismatch");
+  });
+
+  await t.test("signed payment action must match finalized requirements", async t => {
+    async function expectActionMismatch(
+      mutate: Parameters<typeof resignPaymentPayload>[1],
+    ) {
+      const paymentPayload = await resignPaymentPayload(
+        fixture.paymentPayload,
+        mutate,
+      );
+      const result = await verifyPreSettlementExecutionIntent({
+        ...preSettlementInput(fixture),
+        paymentPayload,
+      });
+      expectFailure(result, "payment_payload_requirements_mismatch");
+    }
+
+    await t.test("destination", () =>
+      expectActionMismatch(exact => {
+        exact.action.destination = OTHER_GATEWAY;
+      }));
+    await t.test("token", () =>
+      expectActionMismatch(exact => {
+        exact.action.token = `USDC:0x${"11".repeat(16)}`;
+      }));
+    await t.test("amount", () =>
+      expectActionMismatch(exact => {
+        exact.action.amount = "0.02";
+      }));
+    await t.test("Hyperliquid chain", () =>
+      expectActionMismatch(exact => {
+        exact.action.hyperliquidChain = "Mainnet";
+      }));
+    await t.test("action and outer nonce", () =>
+      expectActionMismatch(exact => {
+        exact.action.nonce = Number(exact.action.nonce) + 1;
+      }));
+    await t.test("payment TTL", () =>
+      expectActionMismatch(exact => {
+        const expiredNonce =
+          Date.now() -
+          (fixture.paymentRequirements.maxTimeoutSeconds + 1) * 1000;
+        exact.action.nonce = expiredNonce;
+        exact.nonce = expiredNonce;
+      }));
   });
 
   await t.test("runtime-invalid payment requirements", async () => {

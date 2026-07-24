@@ -127,8 +127,22 @@ async function signTypedDataWithSigner(
   signer: IntentSigner,
   typedData: ReturnType<typeof buildExecutionIntentTypedData>,
 ): Promise<Hex> {
-  const parameters = signer.account
-    ? { ...typedData, account: signer.account }
-    : typedData;
-  return (await signer.signTypedData(parameters)) as Hex;
+  try {
+    return (await signer.signTypedData(typedData)) as Hex;
+  } catch (error) {
+    if (
+      !signer.account ||
+      typeof error !== "object" ||
+      error == null ||
+      !("name" in error) ||
+      error.name !== "AccountNotFoundError"
+    ) {
+      throw error;
+    }
+  }
+
+  return (await signer.signTypedData({
+    ...typedData,
+    account: signer.account,
+  })) as Hex;
 }

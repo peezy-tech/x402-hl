@@ -11,6 +11,7 @@ var HexRegex = /^0x(?:[0-9a-fA-F]{2})*$/;
 var Bytes32Regex = /^0x[0-9a-fA-F]{64}$/;
 var EvmAddressRegex = /^0x[0-9a-fA-F]{40}$/;
 var DecimalIntegerRegex = /^(0|[1-9]\d*)$/;
+var WellFormedUnicodeRegex = /^(?:[^\uD800-\uDFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF])*$/;
 function isWellFormedUnicode(value) {
   for (let index = 0; index < value.length; index += 1) {
     const codeUnit = value.charCodeAt(index);
@@ -41,7 +42,7 @@ var DecimalIntegerStringSchema = z.string().max(UINT256_MAX_DECIMAL.length).rege
   (value) => !DecimalIntegerRegex.test(value) || value.length !== UINT256_MAX_DECIMAL.length || value <= UINT256_MAX_DECIMAL,
   { message: "Value exceeds the uint256 range" }
 );
-var IntentApplicationSchema = z.string().trim().min(1).max(256).refine(isWellFormedUnicode, WellFormedTextOptions);
+var IntentApplicationSchema = z.string().trim().min(1).max(256).regex(WellFormedUnicodeRegex, WellFormedTextOptions);
 var PositiveSafeIntegerSchema = z.number().int().positive().safe();
 var MAX_JSON_NESTING_DEPTH = 64;
 function createJsonValueSchema(remainingDepth) {
@@ -393,6 +394,7 @@ import { PaymentRequirementsV2Schema } from "@x402/core/schemas";
 import { getAddress as getAddress2, keccak256 as keccak2562, toBytes } from "viem";
 function canonicalizePaymentRequirements(requirements) {
   const parsed = PaymentRequirementsV2Schema.parse(requirements);
+  const extra = requirements.extra == null ? {} : Object.fromEntries(Object.entries(requirements.extra));
   const canonical = {
     scheme: parsed.scheme,
     network: parsed.network,
@@ -400,7 +402,7 @@ function canonicalizePaymentRequirements(requirements) {
     amount: parsed.amount,
     payTo: parsed.payTo,
     maxTimeoutSeconds: parsed.maxTimeoutSeconds,
-    extra: parsed.extra ?? {}
+    extra
   };
   stableJson(canonical);
   return canonical;
@@ -612,8 +614,17 @@ function resolvePaymentRequirementsHash(options) {
   return normalizeBytes32(options.paymentRequirementsHash);
 }
 async function signTypedDataWithSigner(signer, typedData) {
-  const parameters = signer.account ? { ...typedData, account: signer.account } : typedData;
-  return await signer.signTypedData(parameters);
+  try {
+    return await signer.signTypedData(typedData);
+  } catch (error) {
+    if (!signer.account || typeof error !== "object" || error == null || !("name" in error) || error.name !== "AccountNotFoundError") {
+      throw error;
+    }
+  }
+  return await signer.signTypedData({
+    ...typedData,
+    account: signer.account
+  });
 }
 
 // src/intents/extension.ts
@@ -723,6 +734,9 @@ function createIntentQuote(input) {
 }
 
 // src/intents/server/verification.ts
+import { getAddress as getAddress5 } from "viem";
+
+// src/exact/facilitator/verification.ts
 import { SendAssetTypes } from "@nktkas/hyperliquid/api/exchange";
 import { getAddress as getAddress4, recoverTypedDataAddress as recoverTypedDataAddress2 } from "viem";
 
@@ -754,6 +768,234 @@ var ExactHyperliquidPayloadSchema = z3.object({
   nonce: z3.number().int().nonnegative().safe(),
   user: z3.string().regex(EvmAddressRegex2)
 }).strict();
+
+// src/utils.ts
+import * as hl from "@nktkas/hyperliquid";
+
+// src/constants.ts
+import { toHex } from "viem";
+import { arbitrum } from "viem/chains";
+var HYPERLIQUID_MAINNET = "hyperliquid:mainnet";
+var HYPERLIQUID_TESTNET = "hyperliquid:testnet";
+var SupportedHyperliquidNetworks = [
+  HYPERLIQUID_TESTNET,
+  HYPERLIQUID_MAINNET
+];
+var HyperliquidNetworkToChainName = {
+  [HYPERLIQUID_TESTNET]: "Testnet",
+  [HYPERLIQUID_MAINNET]: "Mainnet"
+};
+var HyperliquidNetworkConfigs = {
+  [HYPERLIQUID_TESTNET]: {
+    token: "USDC:0xeb62eee3685fc4c43992febcd9e75443",
+    decimals: 8,
+    signatureChainId: toHex(arbitrum.id)
+  },
+  [HYPERLIQUID_MAINNET]: {
+    token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+    decimals: 8,
+    signatureChainId: toHex(arbitrum.id)
+  }
+};
+
+// src/utils.ts
+function assertHyperliquidNetwork(network) {
+  if (!network.startsWith("hyperliquid:") || !SupportedHyperliquidNetworks.includes(network)) {
+    throw new Error(`Unsupported Hyperliquid network: ${network}`);
+  }
+}
+function getHyperliquidChainName(network) {
+  assertHyperliquidNetwork(network);
+  return HyperliquidNetworkToChainName[network];
+}
+function createInfoClient(network, options) {
+  assertHyperliquidNetwork(network);
+  const transport = new hl.HttpTransport({
+    ...options,
+    isTestnet: network === HYPERLIQUID_TESTNET
+  });
+  return new hl.InfoClient({ transport });
+}
+var tokenInfoCache = /* @__PURE__ */ new Map();
+async function fetchHyperliquidTokenInfo(network, tokenId, signal) {
+  assertHyperliquidNetwork(network);
+  const cacheKey = `${network}:${tokenId.toLowerCase()}`;
+  const cached = tokenInfoCache.get(cacheKey);
+  if (cached) return cached;
+  const client = createInfoClient(network);
+  const response = await client.tokenDetails(
+    { tokenId },
+    signal
+  );
+  const info = {
+    decimals: response.weiDecimals,
+    symbol: response.name,
+    name: response.name,
+    tokenId
+  };
+  tokenInfoCache.set(cacheKey, info);
+  return info;
+}
+
+// src/exact/facilitator/verification.ts
+var MAX_CLOCK_SKEW_MS = 30 * 1e3;
+async function verifyExactHyperliquidPayment(payload, requirements, options) {
+  if (payload.x402Version !== 2) {
+    return { isValid: false, invalidReason: "invalid_x402_version" };
+  }
+  if (payload.accepted?.scheme !== "exact" || requirements.scheme !== "exact") {
+    return { isValid: false, invalidReason: "unsupported_scheme" };
+  }
+  if (payload.accepted?.network !== requirements.network) {
+    return { isValid: false, invalidReason: "network_mismatch" };
+  }
+  if (!paymentRequirementsMatch(payload.accepted, requirements)) {
+    return { isValid: false, invalidReason: "invalid_exact_hl_payload" };
+  }
+  if (!SupportedHyperliquidNetworks.includes(requirements.network)) {
+    return { isValid: false, invalidReason: "invalid_exact_hl_network" };
+  }
+  const parsed = ExactHyperliquidPayloadSchema.safeParse(payload.payload);
+  if (!parsed.success) {
+    return { isValid: false, invalidReason: "invalid_exact_hl_payload" };
+  }
+  const exactPayload = parsed.data;
+  const action = exactPayload.action;
+  if (action.hyperliquidChain !== getHyperliquidChainName(requirements.network)) {
+    return {
+      isValid: false,
+      invalidReason: "invalid_exact_hl_payload_chain_mismatch"
+    };
+  }
+  if (action.nonce !== exactPayload.nonce) {
+    return {
+      isValid: false,
+      invalidReason: "invalid_exact_hl_payload_nonce_mismatch"
+    };
+  }
+  if (action.destination.toLowerCase() !== requirements.payTo.toLowerCase()) {
+    return {
+      isValid: false,
+      invalidReason: "invalid_exact_hl_payload_recipient_mismatch"
+    };
+  }
+  if (!tokenMatchesRequirements(action.token, requirements.asset)) {
+    return {
+      isValid: false,
+      invalidReason: "invalid_exact_hl_payload_asset_mismatch"
+    };
+  }
+  if (!(options.validateTtl ?? validateTtl)(
+    action.nonce,
+    requirements.maxTimeoutSeconds,
+    options.allowExpired
+  )) {
+    return { isValid: false, invalidReason: "payment_expired" };
+  }
+  const decimals = await resolveDecimals(requirements);
+  if (!validateAmount(action.amount, requirements.amount, decimals)) {
+    return {
+      isValid: false,
+      invalidReason: "invalid_exact_hl_payload_amount_mismatch"
+    };
+  }
+  try {
+    const recoveredPayer = getAddress4(
+      await recoverTypedDataAddress2({
+        domain: {
+          name: "HyperliquidSignTransaction",
+          version: "1",
+          chainId: Number.parseInt(action.signatureChainId),
+          verifyingContract: "0x0000000000000000000000000000000000000000"
+        },
+        types: SendAssetTypes,
+        primaryType: "HyperliquidTransaction:SendAsset",
+        message: action,
+        signature: {
+          r: exactPayload.signature.r,
+          s: exactPayload.signature.s,
+          yParity: exactPayload.signature.v - 27
+        }
+      })
+    );
+    if (recoveredPayer !== getAddress4(exactPayload.user)) {
+      return {
+        isValid: false,
+        invalidReason: "invalid_exact_hl_payload_signer_mismatch"
+      };
+    }
+    return { isValid: true, payer: recoveredPayer };
+  } catch {
+    return {
+      isValid: false,
+      invalidReason: "invalid_exact_hl_payload_signature"
+    };
+  }
+}
+async function resolveDecimals(requirements, signal) {
+  if (typeof requirements.extra?.decimals === "number") {
+    return requirements.extra.decimals;
+  }
+  const tokenId = extractTokenId(requirements.asset);
+  if (!tokenId) return void 0;
+  try {
+    const info = await fetchHyperliquidTokenInfo(
+      requirements.network,
+      tokenId,
+      signal
+    );
+    return info.decimals;
+  } catch {
+    return void 0;
+  }
+}
+function tokenMatchesRequirements(payloadToken, requiredAsset) {
+  if (payloadToken === requiredAsset) return true;
+  const payloadTokenId = extractTokenId(payloadToken)?.toLowerCase();
+  const requiredTokenId = extractTokenId(requiredAsset)?.toLowerCase();
+  return Boolean(
+    payloadTokenId && requiredTokenId && payloadTokenId === requiredTokenId
+  );
+}
+function validateAmount(payloadAmount, requiredAmount, decimals) {
+  if (decimals == null || decimals < 0) {
+    return normalizeDecimal(payloadAmount) === normalizeDecimal(requiredAmount);
+  }
+  try {
+    return decimalToAtomic(payloadAmount, decimals) === BigInt(requiredAmount);
+  } catch {
+    return false;
+  }
+}
+function decimalToAtomic(value, decimals) {
+  const match = /^(\d+)(?:\.(\d+))?$/.exec(value.trim());
+  if (!match) throw new Error("invalid decimal amount");
+  const [, whole, fraction = ""] = match;
+  if (/[1-9]/.test(fraction.slice(decimals))) {
+    throw new Error("decimal amount exceeds token precision");
+  }
+  const normalizedFraction = fraction.slice(0, decimals).padEnd(decimals, "0");
+  return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(normalizedFraction || "0");
+}
+function validateTtl(actionTime, maxTimeoutSeconds, allowExpired = false) {
+  if (typeof actionTime !== "number") return false;
+  const now = Date.now();
+  return actionTime <= now + MAX_CLOCK_SKEW_MS && (allowExpired || now <= actionTime + maxTimeoutSeconds * 1e3);
+}
+function extractTokenId(asset) {
+  if (!asset) return void 0;
+  const parts = asset.split(":");
+  return parts.length === 2 ? parts[1] : parts[0]?.startsWith("0x") ? parts[0] : void 0;
+}
+function paymentRequirementsMatch(accepted, required) {
+  if (typeof accepted.payTo !== "string" || typeof required.payTo !== "string") {
+    return false;
+  }
+  return accepted.scheme === required.scheme && accepted.network === required.network && accepted.asset === required.asset && accepted.amount === required.amount && accepted.payTo.toLowerCase() === required.payTo.toLowerCase() && accepted.maxTimeoutSeconds === required.maxTimeoutSeconds;
+}
+function normalizeDecimal(value) {
+  return value.trim().replace(/^0+(?=\d)/, "").replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+}
 
 // src/intents/server/verification.ts
 async function verifyPreSettlementExecutionIntent(input) {
@@ -820,7 +1062,7 @@ async function verifyPreSettlementExecutionIntent(input) {
       "Execution intent application does not match server configuration"
     );
   }
-  if (getAddress4(intent.gateway) !== getAddress4(expectedDomain.gateway)) {
+  if (getAddress5(intent.gateway) !== getAddress5(expectedDomain.gateway)) {
     return failure(
       "gateway_mismatch",
       "Execution intent gateway does not match server configuration"
@@ -894,36 +1136,33 @@ async function verifyPreSettlementExecutionIntent(input) {
       "Execution intent signature is invalid"
     );
   }
+  const paymentVerification = await verifyExactHyperliquidPayment(
+    input.paymentPayload,
+    input.paymentRequirements,
+    { allowExpired: false }
+  );
+  if (!paymentVerification.isValid) {
+    if (paymentVerification.invalidReason === "invalid_exact_hl_payload" || paymentVerification.invalidReason === "invalid_exact_hl_payload_signature" || paymentVerification.invalidReason === "invalid_exact_hl_payload_signer_mismatch") {
+      return failure(
+        "malformed_extension_payload",
+        "Hyperliquid payment payload does not contain a valid payer signature"
+      );
+    }
+    return failure(
+      "payment_payload_requirements_mismatch",
+      "Signed Hyperliquid payment action does not satisfy the finalized requirements"
+    );
+  }
   let paymentPayer;
   try {
-    const parsedPayment = ExactHyperliquidPayloadSchema.parse(
-      input.paymentPayload.payload
-    );
-    const recoveredPayer = await recoverTypedDataAddress2({
-      domain: {
-        name: "HyperliquidSignTransaction",
-        version: "1",
-        chainId: Number.parseInt(parsedPayment.action.signatureChainId),
-        verifyingContract: "0x0000000000000000000000000000000000000000"
-      },
-      types: SendAssetTypes,
-      primaryType: "HyperliquidTransaction:SendAsset",
-      message: parsedPayment.action,
-      signature: {
-        r: parsedPayment.signature.r,
-        s: parsedPayment.signature.s,
-        yParity: parsedPayment.signature.v - 27
-      }
-    });
-    paymentPayer = getAddress4(recoveredPayer);
-    if (paymentPayer !== getAddress4(parsedPayment.user)) throw new Error();
+    paymentPayer = getAddress5(paymentVerification.payer);
   } catch {
     return failure(
       "malformed_extension_payload",
-      "Hyperliquid payment payload does not contain a valid payer signature"
+      "Hyperliquid payment verification did not identify a valid payer"
     );
   }
-  if (input.requireSamePayer !== false && paymentPayer !== getAddress4(signature.signer)) {
+  if (input.requireSamePayer !== false && paymentPayer !== getAddress5(signature.signer)) {
     return failure(
       "execution_intent_payer_mismatch",
       "Execution intent signer does not match the signed Hyperliquid payer"
@@ -945,7 +1184,7 @@ async function verifyPaidExecutionIntent(input) {
   const settlement = input.settleResponse;
   let payer;
   try {
-    payer = getAddress4(settlement.payer);
+    payer = getAddress5(settlement.payer);
   } catch {
     return failure(
       "missing_settled_payer",
@@ -960,7 +1199,7 @@ async function verifyPaidExecutionIntent(input) {
       "Settled payer does not match the signed Hyperliquid payment payer"
     );
   }
-  if (input.requireSamePayer !== false && payer !== getAddress4(verified.signer)) {
+  if (input.requireSamePayer !== false && payer !== getAddress5(verified.signer)) {
     return failure(
       "execution_intent_payer_mismatch",
       "Execution intent signer does not match the settled Hyperliquid payer"
@@ -1295,7 +1534,7 @@ function cloneRecord(record) {
 
 // src/intents/server/executor.ts
 import { randomUUID } from "crypto";
-import { getAddress as getAddress5, keccak256 as keccak2563 } from "viem";
+import { getAddress as getAddress6, keccak256 as keccak2563 } from "viem";
 var IntentStoreConflictError = class extends Error {
   record;
   constructor(message, record) {
@@ -1812,7 +2051,7 @@ function hasBooleanDiscriminator(value, key) {
 function verifyPolicyBinding(record, policy) {
   const expectedSelector = record.intent.callData.length >= 10 ? record.intent.callData.slice(0, 10).toLowerCase() : "0x";
   try {
-    const matches = policy.chainId === record.intent.chainId && getAddress5(policy.target) === getAddress5(record.intent.target) && policy.callDataHash.toLowerCase() === keccak2563(record.intent.callData).toLowerCase() && policy.selector.toLowerCase() === expectedSelector && policy.value === record.intent.value && getAddress5(policy.recipient) === getAddress5(record.intent.recipient);
+    const matches = policy.chainId === record.intent.chainId && getAddress6(policy.target) === getAddress6(record.intent.target) && policy.callDataHash.toLowerCase() === keccak2563(record.intent.callData).toLowerCase() && policy.selector.toLowerCase() === expectedSelector && policy.value === record.intent.value && getAddress6(policy.recipient) === getAddress6(record.intent.recipient);
     if (matches) return void 0;
   } catch {
   }
@@ -1831,7 +2070,7 @@ function verifySimulation(record, simulation) {
     );
   }
   try {
-    const matches = simulation.chainId === record.intent.chainId && getAddress5(simulation.target) === getAddress5(record.intent.target) && simulation.callDataHash.toLowerCase() === keccak2563(record.intent.callData).toLowerCase() && simulation.value === record.intent.value && getAddress5(simulation.recipient) === getAddress5(record.intent.recipient);
+    const matches = simulation.chainId === record.intent.chainId && getAddress6(simulation.target) === getAddress6(record.intent.target) && simulation.callDataHash.toLowerCase() === keccak2563(record.intent.callData).toLowerCase() && simulation.value === record.intent.value && getAddress6(simulation.recipient) === getAddress6(record.intent.recipient);
     if (!matches) {
       return safeFailure(
         "policy_binding_mismatch",

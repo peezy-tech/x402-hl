@@ -14,6 +14,7 @@ var HexRegex = /^0x(?:[0-9a-fA-F]{2})*$/;
 var Bytes32Regex = /^0x[0-9a-fA-F]{64}$/;
 var EvmAddressRegex = /^0x[0-9a-fA-F]{40}$/;
 var DecimalIntegerRegex = /^(0|[1-9]\d*)$/;
+var WellFormedUnicodeRegex = /^(?:[^\uD800-\uDFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF])*$/;
 function isWellFormedUnicode(value) {
   for (let index = 0; index < value.length; index += 1) {
     const codeUnit = value.charCodeAt(index);
@@ -44,7 +45,7 @@ var DecimalIntegerStringSchema = z.string().max(UINT256_MAX_DECIMAL.length).rege
   (value) => !DecimalIntegerRegex.test(value) || value.length !== UINT256_MAX_DECIMAL.length || value <= UINT256_MAX_DECIMAL,
   { message: "Value exceeds the uint256 range" }
 );
-var IntentApplicationSchema = z.string().trim().min(1).max(256).refine(isWellFormedUnicode, WellFormedTextOptions);
+var IntentApplicationSchema = z.string().trim().min(1).max(256).regex(WellFormedUnicodeRegex, WellFormedTextOptions);
 var PositiveSafeIntegerSchema = z.number().int().positive().safe();
 var MAX_JSON_NESTING_DEPTH = 64;
 function createJsonValueSchema(remainingDepth) {
@@ -401,6 +402,7 @@ function hashExecutionIntentTemplate(input) {
 // src/intents/payment.ts
 function canonicalizePaymentRequirements(requirements) {
   const parsed = PaymentRequirementsV2Schema.parse(requirements);
+  const extra = requirements.extra == null ? {} : Object.fromEntries(Object.entries(requirements.extra));
   const canonical = {
     scheme: parsed.scheme,
     network: parsed.network,
@@ -408,7 +410,7 @@ function canonicalizePaymentRequirements(requirements) {
     amount: parsed.amount,
     payTo: parsed.payTo,
     maxTimeoutSeconds: parsed.maxTimeoutSeconds,
-    extra: parsed.extra ?? {}
+    extra
   };
   stableJson(canonical);
   return canonical;
@@ -619,8 +621,17 @@ function resolvePaymentRequirementsHash(options) {
   return normalizeBytes32(options.paymentRequirementsHash);
 }
 async function signTypedDataWithSigner(signer, typedData) {
-  const parameters = signer.account ? { ...typedData, account: signer.account } : typedData;
-  return await signer.signTypedData(parameters);
+  try {
+    return await signer.signTypedData(typedData);
+  } catch (error) {
+    if (!signer.account || typeof error !== "object" || error == null || !("name" in error) || error.name !== "AccountNotFoundError") {
+      throw error;
+    }
+  }
+  return await signer.signTypedData({
+    ...typedData,
+    account: signer.account
+  });
 }
 
 // src/intents/extension.ts

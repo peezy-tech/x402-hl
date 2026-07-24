@@ -96,7 +96,7 @@ declare const IntentExecutionRecordSchema: zod.ZodObject<{
     intentTemplateHash: zod.ZodString;
     paymentRequirementsHash: zod.ZodString;
     quoteId: zod.ZodEffects<zod.ZodString, string, string>;
-    application: zod.ZodEffects<zod.ZodString, string, string>;
+    application: zod.ZodString;
     gateway: zod.ZodString;
     payer: zod.ZodString;
     paymentScheme: zod.ZodString;
@@ -132,7 +132,7 @@ declare const IntentExecutionRecordSchema: zod.ZodObject<{
 } & {
     intent: zod.ZodObject<{
         version: zod.ZodLiteral<2>;
-        application: zod.ZodEffects<zod.ZodString, string, string>;
+        application: zod.ZodString;
         gateway: zod.ZodEffects<zod.ZodString, string, string>;
         user: zod.ZodString;
         chainId: zod.ZodNumber;

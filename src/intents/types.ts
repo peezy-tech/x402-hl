@@ -20,6 +20,8 @@ const HexRegex = /^0x(?:[0-9a-fA-F]{2})*$/;
 const Bytes32Regex = /^0x[0-9a-fA-F]{64}$/;
 const EvmAddressRegex = /^0x[0-9a-fA-F]{40}$/;
 const DecimalIntegerRegex = /^(0|[1-9]\d*)$/;
+const WellFormedUnicodeRegex =
+  /^(?:[^\uD800-\uDFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF])*$/;
 
 export function isWellFormedUnicode(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
@@ -75,7 +77,7 @@ export const IntentApplicationSchema = z
   .trim()
   .min(1)
   .max(256)
-  .refine(isWellFormedUnicode, WellFormedTextOptions);
+  .regex(WellFormedUnicodeRegex, WellFormedTextOptions);
 export const PositiveSafeIntegerSchema = z.number().int().positive().safe();
 
 export type JsonValue =

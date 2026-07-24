@@ -4,7 +4,7 @@ import { z } from 'zod';
 export { C as ClientHyperliquidSigner, E as ClientScheme, F as FacilitatorHyperliquidSigner, t as toClientHyperliquidSigner } from './scheme-Cg7Hznjo.js';
 import * as hl from '@nktkas/hyperliquid';
 import { TxDetailsResponse } from '@nktkas/hyperliquid/api/explorer';
-export { E as FacilitatorScheme } from './scheme-BvihA5s_.js';
+export { E as FacilitatorScheme } from './scheme-BFUtE2sZ.js';
 export { E as ServerScheme } from './scheme-BDAZzpLt.js';
 import '@x402/core/types';
 import 'viem';
