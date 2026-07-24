@@ -6,6 +6,7 @@ import type {
 } from "@x402/core/types";
 import { SendAssetTypes } from "@nktkas/hyperliquid/api/exchange";
 import { signUserSignedAction } from "@nktkas/hyperliquid/signing";
+import { parseSignature } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { ExactHyperliquidScheme as ExactHyperliquidClient } from "../src/exact/client/index";
 import { ExactHyperliquidScheme as ExactHyperliquidFacilitator } from "../src/exact/facilitator/index";
@@ -29,13 +30,15 @@ const requirements: PaymentRequirements = {
   },
 };
 
-async function signedPaymentPayload(): Promise<PaymentPayload> {
+async function signedPaymentPayload(
+  paymentRequirements: PaymentRequirements = requirements,
+): Promise<PaymentPayload> {
   const created = await new ExactHyperliquidClient(
     account,
-  ).createPaymentPayload(2, requirements);
+  ).createPaymentPayload(2, paymentRequirements);
   return {
     ...created,
-    accepted: structuredClone(requirements),
+    accepted: structuredClone(paymentRequirements),
   };
 }
 
@@ -55,6 +58,37 @@ async function resignPaymentPayload(
     action: exact.action,
     types: SendAssetTypes,
   });
+  return resigned;
+}
+
+async function resignPaymentPayloadWithExactChainId(
+  payload: PaymentPayload,
+  signatureChainId: `0x${string}`,
+): Promise<PaymentPayload> {
+  const resigned = structuredClone(payload);
+  const exact = resigned.payload as {
+    action: Parameters<typeof signUserSignedAction>[0]["action"];
+    signature: { r: string; s: string; v: 27 | 28 };
+  };
+  exact.action.signatureChainId = signatureChainId;
+  const signature = parseSignature(
+    await account.signTypedData({
+      domain: {
+        name: "HyperliquidSignTransaction",
+        version: "1",
+        chainId: BigInt(signatureChainId),
+        verifyingContract: "0x0000000000000000000000000000000000000000",
+      },
+      types: SendAssetTypes,
+      primaryType: "HyperliquidTransaction:SendAsset",
+      message: exact.action,
+    }),
+  );
+  exact.signature = {
+    r: signature.r,
+    s: signature.s,
+    v: signature.yParity === 0 ? 27 : 28,
+  };
   return resigned;
 }
 
@@ -83,6 +117,92 @@ test("facilitator accepts a valid non-Arbitrum signature chain ID", async () => 
   );
   assert.equal(result.isValid, true);
   assert.equal(result.payer, account.address);
+});
+
+test("facilitator preserves adjacent uint256 signature chain IDs", async () => {
+  const original = await signedPaymentPayload();
+  for (const signatureChainId of [
+    "0x20000000000000",
+    "0x20000000000001",
+  ] as const) {
+    const payload = await resignPaymentPayloadWithExactChainId(
+      original,
+      signatureChainId,
+    );
+    const result = await new ExactHyperliquidFacilitator().verify(
+      payload,
+      requirements,
+    );
+    assert.equal(result.isValid, true);
+    assert.equal(result.payer, account.address);
+  }
+});
+
+test("client and facilitator accept a valid token name ending in a space", async () => {
+  const trailingSpaceRequirements: PaymentRequirements = {
+    ...requirements,
+    asset: "JPL :0x68046c075c2c34873fd465c76804ef90",
+  };
+  const payload = await signedPaymentPayload(trailingSpaceRequirements);
+  const exact = payload.payload as { action: { token: string } };
+  assert.equal(exact.action.token, trailingSpaceRequirements.asset);
+
+  const result = await new ExactHyperliquidFacilitator().verify(
+    payload,
+    trailingSpaceRequirements,
+  );
+  assert.equal(result.isValid, true);
+  assert.equal(result.payer, account.address);
+});
+
+test("facilitator rejects signed amounts exceeding token precision", async () => {
+  const payload = await resignPaymentPayload(
+    await signedPaymentPayload(),
+    action => {
+      action.amount = "0.010000009";
+    },
+  );
+
+  const result = await new ExactHyperliquidFacilitator().verify(
+    payload,
+    requirements,
+  );
+  assert.equal(result.isValid, false);
+  assert.equal(
+    result.invalidReason,
+    "invalid_exact_hl_payload_amount_mismatch",
+  );
+});
+
+test("facilitator accepts redundant zero digits beyond token precision", async () => {
+  const payload = await resignPaymentPayload(
+    await signedPaymentPayload(),
+    action => {
+      action.amount = "0.010000000";
+    },
+  );
+
+  const result = await new ExactHyperliquidFacilitator().verify(
+    payload,
+    requirements,
+  );
+  assert.equal(result.isValid, true);
+  assert.equal(result.payer, account.address);
+});
+
+test("facilitator rejects malformed accepted.payTo without throwing", async () => {
+  const payload = await signedPaymentPayload();
+  const accepted = payload.accepted as unknown as { payTo: unknown };
+  accepted.payTo = null;
+  const facilitator = new ExactHyperliquidFacilitator();
+
+  const verification = await facilitator.verify(payload, requirements);
+  assert.equal(verification.isValid, false);
+  assert.equal(verification.invalidReason, "invalid_exact_hl_payload");
+
+  const settlement = await facilitator.settle(payload, requirements);
+  assert.equal(settlement.success, false);
+  assert.equal(settlement.errorReason, "invalid_exact_hl_payload");
 });
 
 test("facilitator still rejects the wrong Hyperliquid environment", async () => {
@@ -161,7 +281,78 @@ test("facilitator verify rejects a malformed cryptographic signature", async () 
 type FacilitatorInternals = {
   findConfirmedTransaction(...args: unknown[]): Promise<string | undefined>;
   submitToExchange(...args: unknown[]): Promise<unknown>;
+  validateTtl(...args: unknown[]): boolean;
 };
+
+test("settlement cache distinguishes adjacent uint256 chain IDs", async () => {
+  const base = await signedPaymentPayload();
+  const original = await resignPaymentPayloadWithExactChainId(
+    base,
+    "0x20000000000000",
+  );
+  const alternate = await resignPaymentPayloadWithExactChainId(
+    base,
+    "0x20000000000001",
+  );
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as FacilitatorInternals;
+  const originalHash = `0x${"66".repeat(32)}`;
+  const alternateHash = `0x${"67".repeat(32)}`;
+  let reconciliationCalls = 0;
+  internals.findConfirmedTransaction = async (...args: unknown[]) => {
+    reconciliationCalls += 1;
+    const payload = args[2] as { action: { signatureChainId: string } };
+    return payload.action.signatureChainId === "0x20000000000001"
+      ? alternateHash
+      : originalHash;
+  };
+  internals.submitToExchange = async () => {
+    throw new Error("a reconciled payment must not be submitted");
+  };
+
+  const first = await facilitator.settle(original, requirements);
+  const second = await facilitator.settle(alternate, requirements);
+
+  assert.equal(first.success, true);
+  assert.equal(first.transaction, originalHash);
+  assert.equal(second.success, true);
+  assert.equal(second.transaction, alternateHash);
+  assert.equal(reconciliationCalls, 2);
+});
+
+test("concurrent settlement coalesces equivalent signature chain ID encodings", async () => {
+  const original = await signedPaymentPayload();
+  const equivalent = structuredClone(original);
+  const action = equivalent.payload.action as { signatureChainId: string };
+  action.signatureChainId = `0x0${action.signatureChainId.slice(2)}`;
+
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as FacilitatorInternals;
+  const confirmedHash = `0x${"68".repeat(32)}`;
+  let reconciliationCalls = 0;
+  let submissionCalls = 0;
+  internals.findConfirmedTransaction = async (...args: unknown[]) => {
+    reconciliationCalls += 1;
+    const attempts = args[4] as number | undefined;
+    return attempts === undefined ? confirmedHash : undefined;
+  };
+  internals.submitToExchange = async () => {
+    submissionCalls += 1;
+    return { status: "ok" };
+  };
+
+  const [first, second] = await Promise.all([
+    facilitator.settle(original, requirements),
+    facilitator.settle(equivalent, requirements),
+  ]);
+
+  assert.equal(first.success, true);
+  assert.equal(first.transaction, confirmedHash);
+  assert.equal(second.success, true);
+  assert.equal(second.transaction, confirmedHash);
+  assert.equal(submissionCalls, 1);
+  assert.equal(reconciliationCalls, 2);
+});
 
 test("settle retried after the TTL lapsed still recovers an already-settled payment", async t => {
   const payload = await signedPaymentPayload();
@@ -209,6 +400,55 @@ test("settle of an expired payment with no ledger match fails closed without sub
   assert.equal(submitted, false);
 });
 
+test("settle rejects a far-future nonce before ledger reconciliation", async () => {
+  const futureNonce = Date.now() + 60_000;
+  const payload = await resignPaymentPayload(
+    await signedPaymentPayload(),
+    action => {
+      action.nonce = futureNonce;
+    },
+  );
+  (payload.payload as { nonce: number }).nonce = futureNonce;
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as FacilitatorInternals;
+  let reconciliationCalls = 0;
+  let submissionCalls = 0;
+  internals.findConfirmedTransaction = async () => {
+    reconciliationCalls += 1;
+    return undefined;
+  };
+  internals.submitToExchange = async () => {
+    submissionCalls += 1;
+    return { status: "ok" };
+  };
+
+  const settled = await facilitator.settle(payload, requirements);
+  assert.equal(settled.success, false);
+  assert.equal(settled.errorReason, "payment_expired");
+  assert.equal(reconciliationCalls, 0);
+  assert.equal(submissionCalls, 0);
+});
+
+test("settle does not submit when TTL expires during pre-submit reconciliation", async () => {
+  const payload = await signedPaymentPayload();
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as FacilitatorInternals;
+  let ttlChecks = 0;
+  let submitted = false;
+  internals.validateTtl = () => ++ttlChecks < 3;
+  internals.findConfirmedTransaction = async () => undefined;
+  internals.submitToExchange = async () => {
+    submitted = true;
+    return { status: "ok" };
+  };
+
+  const settled = await facilitator.settle(payload, requirements);
+  assert.equal(settled.success, false);
+  assert.equal(settled.errorReason, "payment_expired");
+  assert.equal(ttlChecks, 3);
+  assert.equal(submitted, false);
+});
+
 test("settle reconciles after a replay submission error", async () => {
   const payload = await signedPaymentPayload();
   const facilitator = new ExactHyperliquidFacilitator();
@@ -240,6 +480,131 @@ test("settle keeps an unreconciled submission error as hl_exchange_error", async
   const settled = await facilitator.settle(payload, requirements);
   assert.equal(settled.success, false);
   assert.equal(settled.errorReason, "hl_exchange_error");
+});
+
+test("post-submit reconciliation gets a fresh timeout after an ambiguous submission", async t => {
+  const payload = await signedPaymentPayload();
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as FacilitatorInternals & {
+    runBeforeDeadline<T>(
+      deadline: number,
+      operation: (signal: AbortSignal) => Promise<T>,
+    ): Promise<T>;
+  };
+  const confirmedHash = `0x${"88".repeat(32)}`;
+  const now = Date.now();
+  t.mock.timers.enable({ apis: ["Date"], now });
+
+  let submissionDeadline: number | undefined;
+  let confirmationDeadline: number | undefined;
+  let reconciliationCalls = 0;
+  let submissionStarted = false;
+  internals.runBeforeDeadline = async (deadline, operation) => {
+    submissionDeadline = deadline;
+    void operation(new AbortController().signal);
+    t.mock.timers.setTime(deadline);
+    throw new Error("exchange response timed out after acceptance");
+  };
+  internals.findConfirmedTransaction = async (...args: unknown[]) => {
+    reconciliationCalls += 1;
+    if (reconciliationCalls === 1) return undefined;
+    confirmationDeadline = args[5] as number;
+    return confirmationDeadline > Date.now() ? confirmedHash : undefined;
+  };
+  internals.submitToExchange = async () => {
+    submissionStarted = true;
+    return new Promise(() => {});
+  };
+
+  const settled = await facilitator.settle(payload, requirements);
+
+  assert.equal(settled.success, true);
+  assert.equal(settled.transaction, confirmedHash);
+  assert.equal(submissionStarted, true);
+  assert.equal(reconciliationCalls, 2);
+  assert.equal(submissionDeadline, now + 30_000);
+  assert.equal(confirmationDeadline, now + 60_000);
+});
+
+test("the timeout budget aborts a stalled exchange response body", async t => {
+  const payload = await signedPaymentPayload();
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as {
+    runBeforeDeadline<T>(
+      deadline: number,
+      operation: (signal: AbortSignal) => Promise<T>,
+    ): Promise<T>;
+    submitToExchange(
+      endpoint: string,
+      payload: unknown,
+      signal?: AbortSignal,
+    ): Promise<unknown>;
+  };
+  let requestSignal: AbortSignal | undefined;
+  t.mock.method(
+    globalThis,
+    "fetch",
+    (async (_input, init) => {
+      requestSignal = init?.signal ?? undefined;
+      return {
+        ok: true,
+        status: 200,
+        text: () => new Promise<string>(() => {}),
+      } as Response;
+    }) as typeof fetch,
+  );
+
+  const started = Date.now();
+  await assert.rejects(
+    internals.runBeforeDeadline(started + 50, signal =>
+      internals.submitToExchange(
+        "https://api.hyperliquid-testnet.xyz/exchange",
+        payload.payload,
+        signal,
+      ),
+    ),
+    /confirmation deadline exceeded/,
+  );
+  assert.equal(requestSignal?.aborted, true);
+  assert.ok(Date.now() - started < 1_000);
+});
+
+test("the timeout budget aborts an in-flight fixed-attempt ledger lookup", async () => {
+  const payload = await signedPaymentPayload();
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as {
+    findConfirmedTransaction(
+      client: unknown,
+      payer: string,
+      payload: unknown,
+      requirements: PaymentRequirements,
+      attempts: number,
+      deadline: number,
+    ): Promise<string | undefined>;
+  };
+  let requestSignal: AbortSignal | undefined;
+  const client = {
+    userNonFundingLedgerUpdates(
+      _parameters: unknown,
+      signal?: AbortSignal,
+    ): Promise<never> {
+      requestSignal = signal;
+      return new Promise(() => {});
+    },
+  };
+
+  const started = Date.now();
+  const found = await internals.findConfirmedTransaction(
+    client,
+    account.address,
+    payload.payload,
+    requirements,
+    1,
+    started + 50,
+  );
+  assert.equal(found, undefined);
+  assert.equal(requestSignal?.aborted, true);
+  assert.ok(Date.now() - started < 1_000);
 });
 
 test("facilitator recognizes the public spotTransfer ledger candidate shape", () => {
@@ -293,6 +658,16 @@ test("facilitator recognizes the public spotTransfer ledger candidate shape", ()
       {
         ...update,
         delta: { ...update.delta, destination: OTHER_USER },
+      },
+      expected,
+    ),
+    false,
+  );
+  assert.equal(
+    facilitator.ledgerUpdateMatchesPayment(
+      {
+        ...update,
+        delta: { ...update.delta, amount: "0.010000009" },
       },
       expected,
     ),
@@ -379,4 +754,55 @@ test("ledger reconciliation finds a transfer when the client clock runs ahead of
     1,
   );
   assert.equal(found, hash);
+});
+
+test("post-submit confirmation outlasts the former five-attempt limit", async () => {
+  const payload = await signedPaymentPayload();
+  const exact = payload.payload as {
+    nonce: number;
+    action: { destination: string; token: string; amount: string };
+  };
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as {
+    findConfirmedTransaction(
+      client: unknown,
+      payer: string,
+      payload: unknown,
+      requirements: PaymentRequirements,
+    ): Promise<string | undefined>;
+    confirmTransaction(...args: unknown[]): Promise<boolean>;
+  };
+  internals.confirmTransaction = async () => true;
+
+  const hash = `0x${"88".repeat(32)}`;
+  let calls = 0;
+  const client = {
+    async userNonFundingLedgerUpdates() {
+      calls += 1;
+      if (calls <= 5) return [];
+      return [
+        {
+          time: exact.nonce,
+          hash,
+          delta: {
+            type: "spotTransfer",
+            token: exact.action.token,
+            amount: exact.action.amount,
+            user: account.address,
+            destination: exact.action.destination,
+            nonce: null,
+          },
+        },
+      ];
+    },
+  };
+
+  const found = await internals.findConfirmedTransaction(
+    client,
+    account.address,
+    payload.payload,
+    requirements,
+  );
+  assert.equal(found, hash);
+  assert.equal(calls, 6);
 });

@@ -4,7 +4,7 @@ import { z } from 'zod';
 export { C as ClientHyperliquidSigner, E as ClientScheme, F as FacilitatorHyperliquidSigner, t as toClientHyperliquidSigner } from './scheme-Cg7Hznjo.js';
 import * as hl from '@nktkas/hyperliquid';
 import { TxDetailsResponse } from '@nktkas/hyperliquid/api/explorer';
-export { E as FacilitatorScheme } from './scheme-C02gLyWS.js';
+export { E as FacilitatorScheme } from './scheme-BFUtE2sZ.js';
 export { E as ServerScheme } from './scheme-BDAZzpLt.js';
 import '@x402/core/types';
 import 'viem';
@@ -103,18 +103,18 @@ declare const ExactHyperliquidPayloadSchema: z.ZodObject<{
     user: string;
 }>;
 type ExactHyperliquidPayload = z.infer<typeof ExactHyperliquidPayloadSchema>;
-declare const HyperliquidErrorReasons: readonly ["invalid_x402_version", "unsupported_scheme", "network_mismatch", "invalid_exact_hl_payload", "invalid_exact_hl_payload_signature", "invalid_exact_hl_payload_signer_mismatch", "invalid_exact_hl_payload_nonce_mismatch", "invalid_exact_hl_payload_chain_mismatch", "invalid_exact_hl_payload_asset_mismatch", "invalid_exact_hl_payload_recipient_mismatch", "invalid_exact_hl_payload_amount_mismatch", "invalid_exact_hl_network", "hl_exchange_error", "hl_tx_not_found", "hl_tx_unconfirmed", "hl_transfer_not_confirmed"];
+declare const HyperliquidErrorReasons: readonly ["invalid_x402_version", "unsupported_scheme", "network_mismatch", "invalid_exact_hl_payload", "invalid_exact_hl_payload_signature", "invalid_exact_hl_payload_signer_mismatch", "invalid_exact_hl_payload_nonce_mismatch", "invalid_exact_hl_payload_chain_mismatch", "invalid_exact_hl_payload_asset_mismatch", "invalid_exact_hl_payload_recipient_mismatch", "invalid_exact_hl_payload_amount_mismatch", "invalid_exact_hl_network", "payment_expired", "hl_exchange_error", "hl_tx_not_found", "hl_tx_unconfirmed", "hl_transfer_not_confirmed"];
 
 declare function assertHyperliquidNetwork(network: string): asserts network is HyperliquidNetwork;
 declare function getHyperliquidChainName(network: string): HyperliquidChainName;
 declare function createInfoClient(network: string, options?: ConstructorParameters<typeof hl.HttpTransport>[0]): hl.InfoClient;
-declare function fetchTransactionDetails(network: string, hash: TxDetailsResponse["tx"]["hash"]): Promise<TxDetailsResponse["tx"]>;
+declare function fetchTransactionDetails(network: string, hash: TxDetailsResponse["tx"]["hash"], signal?: AbortSignal): Promise<TxDetailsResponse["tx"]>;
 interface HyperliquidTokenInfo {
     decimals: number;
     symbol?: string;
     name?: string;
     tokenId?: string;
 }
-declare function fetchHyperliquidTokenInfo(network: string, tokenId: string): Promise<HyperliquidTokenInfo>;
+declare function fetchHyperliquidTokenInfo(network: string, tokenId: string, signal?: AbortSignal): Promise<HyperliquidTokenInfo>;
 
 export { type ExactHyperliquidPayload, ExactHyperliquidPayloadSchema, HyperliquidChainName, HyperliquidErrorReasons, HyperliquidNetwork, HyperliquidTokenIdRegex, type HyperliquidTokenInfo, assertHyperliquidNetwork, createInfoClient, fetchHyperliquidTokenInfo, fetchTransactionDetails, getHyperliquidChainName };

@@ -215,9 +215,10 @@ Before requesting settlement, validate the upstream payment identifier against
 the persisted quote, then run `verifyPreSettlementExecutionIntent` (or the
 executor's `verifyBeforeSettlement`) with the same payload, requirements, and
 persisted quote values. A payload that fails either application-level binding or
-settlement-independent intent checks — a missing, malformed, mismatched, or
-unsigned intent — must be rejected without settling, because it can never be
-registered or automatically refunded afterwards.
+pre-settlement checks — a missing, malformed, mismatched, or unsigned intent,
+an invalid signed Hyperliquid payment payload, or a payment payer that differs
+from the recovered intent signer — must be rejected without settling, because
+it can never be registered or automatically refunded afterwards.
 
 After settlement, provide the actual payment payload, exact settled
 requirements, and facilitator response to paid-intent verification. Repeat the
@@ -253,33 +254,77 @@ if (!verified.ok) {
 This call requires `settleResponse.success === true`, a payer, a settlement
 transaction, a matching network, the locally expected domain/quote/template,
 the exact payment-requirements hash, an unexpired intent, and a valid payer
-signature. Never replace settlement evidence with a successful facilitator
+signature. The receipt payer is checked against the recovered intent signer
+again. Never replace settlement evidence with a successful facilitator
 `verify()` response.
+
+If a separately reviewed delegated-payer design sets `requireSamePayer: false`,
+verification still requires a valid payment signature and binds the settlement
+receipt payer to the recovered payment payer. Only equality between that payer
+and the intent signer is relaxed.
 
 ## 4. Implement A Durable Store Adapter
 
 The store is the replay and concurrency boundary. Store every settled payment,
 not only one row per intent: one payment is the primary execution funding row,
 and later payments for the same signed intent are refund-only rows. A production
-table needs at least these keys and indexes (transaction identifiers should be
-canonicalized to lowercase on write):
+table needs one canonical transaction function shared by checks, lookups, conflict
+targets, and indexes. This example matches ECMAScript `trim()` and then folds ASCII
+case:
 
 ```sql
+CREATE FUNCTION x402_canonical_transaction(value text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+SET search_path = pg_catalog
+AS $function$
+  SELECT pg_catalog.translate(
+    pg_catalog.btrim(value, U&'\0009\000A\000B\000C\000D\0020\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000\FEFF'),
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+    'abcdefghijklmnopqrstuvwxyz'
+  )
+$function$;
+
 ALTER TABLE intent_payments
-  ADD PRIMARY KEY (payment_network, payment_transaction);
+  ADD PRIMARY KEY (payment_network, payment_transaction),
+  ADD CONSTRAINT payment_transaction_canonical
+    CHECK (payment_transaction = x402_canonical_transaction(payment_transaction)),
+  ADD CONSTRAINT execution_transaction_canonical
+    CHECK (execution_transaction IS NULL OR execution_transaction = x402_canonical_transaction(execution_transaction)),
+  ADD CONSTRAINT refund_transaction_canonical
+    CHECK (refund_transaction IS NULL OR refund_transaction = x402_canonical_transaction(refund_transaction));
+CREATE UNIQUE INDEX intents_payment_tx_uq
+  ON intent_payments (
+    payment_network,
+    x402_canonical_transaction(payment_transaction)
+  );
 CREATE UNIQUE INDEX intents_primary_intent_uq
   ON intent_payments (intent_hash)
   WHERE primary_payment;
 CREATE UNIQUE INDEX intents_primary_quote_uq
-  ON intent_payments (application, gateway, quote_id)
+  ON intent_payments (application, lower(gateway), quote_id)
   WHERE primary_payment;
 CREATE UNIQUE INDEX intents_execution_tx_uq
-  ON intent_payments (execution_network, execution_transaction)
+  ON intent_payments (
+    execution_network,
+    x402_canonical_transaction(execution_transaction)
+  )
   WHERE execution_transaction IS NOT NULL;
 CREATE UNIQUE INDEX intents_refund_tx_uq
-  ON intent_payments (refund_network, refund_transaction)
+  ON intent_payments (
+    refund_network,
+    x402_canonical_transaction(refund_transaction)
+  )
   WHERE refund_transaction IS NOT NULL;
 ```
+
+For an existing table, run the locked, collision-checking backfill represented by
+`POSTGRES_INTENT_STORE_CANONICALIZATION_MIGRATION_DDL` before deploying the new
+adapter. Never silently choose a winner when two legacy rows collapse to one
+canonical payment key.
 
 Adapt those rows to `IntentExecutionStore`:
 
@@ -290,16 +335,53 @@ import type {
   IntentExecutionTransition,
 } from "x402-hl/intents/server";
 
+const canonicalTransaction = (value: string) =>
+  value.trim().replace(/[A-Z]/g, character => character.toLowerCase());
+
+function canonicalTransition(input: IntentExecutionTransition) {
+  return {
+    ...input,
+    ...(input.paymentTransaction
+      ? { paymentTransaction: canonicalTransaction(input.paymentTransaction) }
+      : {}),
+    patch: input.patch && {
+      ...input.patch,
+      ...(input.patch.executionTransaction
+        ? {
+            executionTransaction: canonicalTransaction(
+              input.patch.executionTransaction,
+            ),
+          }
+        : {}),
+      ...(input.patch.refundTransaction
+        ? {
+            refundTransaction: canonicalTransaction(input.patch.refundTransaction),
+          }
+        : {}),
+    },
+  } as IntentExecutionTransition;
+}
+
 class PostgresIntentStore implements IntentExecutionStore {
   constructor(private readonly db: Database) {}
 
   async registerPaid(record: IntentExecutionRecord) {
+    const canonicalRecord = {
+      ...record,
+      paymentTransaction: canonicalTransaction(record.paymentTransaction),
+      executionTransaction: record.executionTransaction
+        ? canonicalTransaction(record.executionTransaction)
+        : undefined,
+      refundTransaction: record.refundTransaction
+        ? canonicalTransaction(record.refundTransaction)
+        : undefined,
+    };
     return this.db.transaction(async tx => {
       // INSERT the primary payment, or atomically insert a refund-only
       // duplicate-payment row when the same intent already has a different
       // settled transaction. Never return a conflict without retaining that
       // additional payment.
-      return atomicRegisterPaid(tx, record);
+      return atomicRegisterPaid(tx, canonicalRecord);
     });
   }
 
@@ -311,7 +393,7 @@ class PostgresIntentStore implements IntentExecutionStore {
     return loadPaymentRecord(
       this.db,
       paymentNetwork,
-      paymentTransaction.toLowerCase(),
+      canonicalTransaction(paymentTransaction),
     );
   }
 
@@ -320,7 +402,7 @@ class PostgresIntentStore implements IntentExecutionStore {
       // One UPDATE must match the selected payment row + expected revision +
       // from status and, when present, the claim token. Increment revision in
       // that UPDATE, validate the legal state transition, and return the row.
-      return compareAndSwapIntent(tx, input);
+      return compareAndSwapIntent(tx, canonicalTransition(input));
     });
   }
 }

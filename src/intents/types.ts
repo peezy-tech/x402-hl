@@ -20,6 +20,31 @@ const HexRegex = /^0x(?:[0-9a-fA-F]{2})*$/;
 const Bytes32Regex = /^0x[0-9a-fA-F]{64}$/;
 const EvmAddressRegex = /^0x[0-9a-fA-F]{40}$/;
 const DecimalIntegerRegex = /^(0|[1-9]\d*)$/;
+const WellFormedUnicodeRegex =
+  /^(?:[^\uD800-\uDFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF])*$/;
+
+export function isWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+const WellFormedTextOptions = {
+  message: "Text must contain well-formed Unicode",
+} as const;
+const IntentTextIdentifierSchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .refine(isWellFormedUnicode, WellFormedTextOptions);
 
 export const HexSchema = z.string().regex(HexRegex);
 export const Bytes32Schema = z.string().regex(Bytes32Regex);
@@ -32,17 +57,27 @@ export const NonZeroEvmAddressSchema = EvmAddressSchema.refine(
  * Every decimal-integer field is committed as a uint256 in the EIP-712
  * message, so values beyond uint256 must fail schema validation here rather
  * than surface later as a viem IntegerOutOfRangeError during hashing. The
- * length cap bounds the BigInt conversion; 2^256 - 1 has 78 decimal digits.
+ * length cap bounds validation work; 2^256 - 1 has 78 decimal digits.
  */
 export const UINT256_MAX = (1n << 256n) - 1n;
+const UINT256_MAX_DECIMAL = UINT256_MAX.toString();
 export const DecimalIntegerStringSchema = z
   .string()
-  .max(78)
+  .max(UINT256_MAX_DECIMAL.length)
   .regex(DecimalIntegerRegex)
-  .refine(value => BigInt(value) <= UINT256_MAX, {
-    message: "Value exceeds the uint256 range",
-  });
-export const IntentApplicationSchema = z.string().trim().min(1).max(256);
+  .refine(
+    value =>
+      !DecimalIntegerRegex.test(value) ||
+      value.length !== UINT256_MAX_DECIMAL.length ||
+      value <= UINT256_MAX_DECIMAL,
+    { message: "Value exceeds the uint256 range" },
+  );
+export const IntentApplicationSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(256)
+  .regex(WellFormedUnicodeRegex, WellFormedTextOptions);
 export const PositiveSafeIntegerSchema = z.number().int().positive().safe();
 
 export type JsonValue =
@@ -53,17 +88,25 @@ export type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
-export const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
-  z.union([
+export const MAX_JSON_NESTING_DEPTH = 64;
+
+function createJsonValueSchema(remainingDepth: number): z.ZodType<JsonValue> {
+  const scalar = z.union([
     z.null(),
     z.boolean(),
     z.number().finite(),
     z.string(),
-    z.array(JsonValueSchema),
-    z.record(JsonValueSchema),
-  ]),
+  ]);
+  if (remainingDepth === 0) return scalar;
+
+  const child = createJsonValueSchema(remainingDepth - 1);
+  return z.union([scalar, z.array(child), z.record(child)]);
+}
+
+export const JsonValueSchema = createJsonValueSchema(MAX_JSON_NESTING_DEPTH);
+export const JsonRecordSchema = z.record(
+  createJsonValueSchema(MAX_JSON_NESTING_DEPTH - 1),
 );
-export const JsonRecordSchema = z.record(JsonValueSchema);
 
 /** The only execution mode implemented by the TypeScript executor. */
 export const IntentExecutionModeSchema = z.literal("brokered");
@@ -79,25 +122,27 @@ export const ExecutionIntentDomainSchema = z.object({
 });
 export type ExecutionIntentDomain = z.infer<typeof ExecutionIntentDomainSchema>;
 
-export const HyperEvmExecutionIntentSchema = z.object({
-  version: z.literal(X402_HL_INTENT_VERSION),
-  application: IntentApplicationSchema,
-  gateway: NonZeroEvmAddressSchema,
-  user: EvmAddressSchema,
-  chainId: PositiveSafeIntegerSchema,
-  target: EvmAddressSchema,
-  callData: HexSchema,
-  value: DecimalIntegerStringSchema,
-  recipient: NonZeroEvmAddressSchema,
-  refundAddress: NonZeroEvmAddressSchema,
-  maxGasCost: DecimalIntegerStringSchema,
-  maxSlippageBps: z.number().int().min(0).max(10_000),
-  deadline: PositiveSafeIntegerSchema,
-  nonce: z.string().min(1).max(256),
-  quoteId: z.string().min(1).max(256),
-  metadataHash: Bytes32Schema,
-  metadata: JsonRecordSchema.optional(),
-});
+export const HyperEvmExecutionIntentSchema = z
+  .object({
+    version: z.literal(X402_HL_INTENT_VERSION),
+    application: IntentApplicationSchema,
+    gateway: NonZeroEvmAddressSchema,
+    user: EvmAddressSchema,
+    chainId: PositiveSafeIntegerSchema,
+    target: EvmAddressSchema,
+    callData: HexSchema,
+    value: DecimalIntegerStringSchema,
+    recipient: NonZeroEvmAddressSchema,
+    refundAddress: NonZeroEvmAddressSchema,
+    maxGasCost: DecimalIntegerStringSchema,
+    maxSlippageBps: z.number().int().min(0).max(10_000),
+    deadline: PositiveSafeIntegerSchema,
+    nonce: IntentTextIdentifierSchema,
+    quoteId: IntentTextIdentifierSchema,
+    metadataHash: Bytes32Schema,
+    metadata: JsonRecordSchema.optional(),
+  })
+  .strict();
 
 export type HyperEvmExecutionIntent = z.infer<typeof HyperEvmExecutionIntentSchema>;
 
@@ -128,13 +173,15 @@ export type HyperEvmExecutionIntentInput = Omit<
     >
   >;
 
-export const SignedHyperEvmExecutionIntentSchema = z.object({
-  intent: HyperEvmExecutionIntentSchema,
-  paymentRequirementsHash: Bytes32Schema,
-  intentHash: Bytes32Schema,
-  signature: HexSchema,
-  signer: EvmAddressSchema.optional(),
-});
+export const SignedHyperEvmExecutionIntentSchema = z
+  .object({
+    intent: HyperEvmExecutionIntentSchema,
+    paymentRequirementsHash: Bytes32Schema,
+    intentHash: Bytes32Schema,
+    signature: HexSchema,
+    signer: EvmAddressSchema.optional(),
+  })
+  .strict();
 
 export type SignedHyperEvmExecutionIntent = z.infer<
   typeof SignedHyperEvmExecutionIntentSchema
@@ -146,7 +193,7 @@ export const IntentDeclarationSchema = z.object({
   mode: IntentExecutionModeSchema,
   intent: HyperEvmExecutionIntentSchema,
   intentTemplateHash: Bytes32Schema,
-  quoteId: z.string().min(1).max(256),
+  quoteId: IntentTextIdentifierSchema,
 });
 
 export type IntentDeclaration = z.infer<typeof IntentDeclarationSchema>;
@@ -161,7 +208,7 @@ export const IntentPaymentExtraSchema = z.object({
   version: z.literal(X402_HL_INTENT_VERSION),
   mode: IntentExecutionModeSchema,
   intentTemplateHash: Bytes32Schema,
-  quoteId: z.string().min(1).max(256),
+  quoteId: IntentTextIdentifierSchema,
   applicationHash: Bytes32Schema,
   gateway: EvmAddressSchema,
   chainId: PositiveSafeIntegerSchema,
@@ -256,7 +303,7 @@ export const IntentExecutionReceiptSchema = z.object({
   intentHash: Bytes32Schema,
   intentTemplateHash: Bytes32Schema,
   paymentRequirementsHash: Bytes32Schema,
-  quoteId: z.string().min(1).max(256),
+  quoteId: IntentTextIdentifierSchema,
   application: IntentApplicationSchema,
   gateway: EvmAddressSchema,
   payer: EvmAddressSchema,

@@ -11,6 +11,7 @@ import {
   HyperEvmExecutionIntentInput,
   HyperEvmExecutionIntentSchema,
   JsonRecordSchema,
+  isWellFormedUnicode,
   X402_HL_INTENT_DOMAIN_NAME,
   X402_HL_INTENT_DOMAIN_VERSION,
   X402_HL_INTENT_VERSION,
@@ -100,6 +101,9 @@ export function hashIntentMetadata(metadata: unknown): Hex {
  * typed data.
  */
 export function hashIntentText(value: string): Hex {
+  if (!isWellFormedUnicode(value)) {
+    throw new TypeError("Intent text must contain well-formed Unicode");
+  }
   return keccak256(stringToBytes(value));
 }
 

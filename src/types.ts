@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const HyperliquidTokenIdRegex = /^[A-Za-z0-9]+:0x[0-9a-fA-F]{32,40}$/;
+export const HyperliquidTokenIdRegex = /^[^:]+:0x[0-9a-fA-F]{32,40}$/;
 const Bytes32Regex = /^0x[0-9a-fA-F]{64}$/;
 const EvmAddressRegex = /^0x[0-9a-fA-F]{40}$/;
 const HexIntegerRegex = /^0x[0-9a-fA-F]+$/;
@@ -47,6 +47,7 @@ export const HyperliquidErrorReasons = [
   "invalid_exact_hl_payload_recipient_mismatch",
   "invalid_exact_hl_payload_amount_mismatch",
   "invalid_exact_hl_network",
+  "payment_expired",
   "hl_exchange_error",
   "hl_tx_not_found",
   "hl_tx_unconfirmed",

@@ -14,6 +14,7 @@ declare const X402_HL_INTENT_DOMAIN_NAME = "x402-hl Execution Intent";
 declare const X402_HL_INTENT_DOMAIN_VERSION = "2";
 declare const ZERO_ADDRESS: "0x0000000000000000000000000000000000000000";
 declare const ZERO_BYTES32: "0x0000000000000000000000000000000000000000000000000000000000000000";
+declare function isWellFormedUnicode(value: string): boolean;
 declare const HexSchema: z.ZodString;
 declare const Bytes32Schema: z.ZodString;
 declare const EvmAddressSchema: z.ZodString;
@@ -22,7 +23,7 @@ declare const NonZeroEvmAddressSchema: z.ZodEffects<z.ZodString, string, string>
  * Every decimal-integer field is committed as a uint256 in the EIP-712
  * message, so values beyond uint256 must fail schema validation here rather
  * than surface later as a viem IntegerOutOfRangeError during hashing. The
- * length cap bounds the BigInt conversion; 2^256 - 1 has 78 decimal digits.
+ * length cap bounds validation work; 2^256 - 1 has 78 decimal digits.
  */
 declare const UINT256_MAX: bigint;
 declare const DecimalIntegerStringSchema: z.ZodEffects<z.ZodString, string, string>;
@@ -31,7 +32,8 @@ declare const PositiveSafeIntegerSchema: z.ZodNumber;
 type JsonValue = null | boolean | number | string | JsonValue[] | {
     [key: string]: JsonValue;
 };
-declare const JsonValueSchema: z.ZodType<JsonValue>;
+declare const MAX_JSON_NESTING_DEPTH = 64;
+declare const JsonValueSchema: z.ZodType<JsonValue, z.ZodTypeDef, JsonValue>;
 declare const JsonRecordSchema: z.ZodRecord<z.ZodString, z.ZodType<JsonValue, z.ZodTypeDef, JsonValue>>;
 /** The only execution mode implemented by the TypeScript executor. */
 declare const IntentExecutionModeSchema: z.ZodLiteral<"brokered">;
@@ -65,11 +67,11 @@ declare const HyperEvmExecutionIntentSchema: z.ZodObject<{
     maxGasCost: z.ZodEffects<z.ZodString, string, string>;
     maxSlippageBps: z.ZodNumber;
     deadline: z.ZodNumber;
-    nonce: z.ZodString;
-    quoteId: z.ZodString;
+    nonce: z.ZodEffects<z.ZodString, string, string>;
+    quoteId: z.ZodEffects<z.ZodString, string, string>;
     metadataHash: z.ZodString;
     metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodType<JsonValue, z.ZodTypeDef, JsonValue>>>;
-}, "strip", z.ZodTypeAny, {
+}, "strict", z.ZodTypeAny, {
     value: string;
     application: string;
     gateway: string;
@@ -123,11 +125,11 @@ declare const SignedHyperEvmExecutionIntentSchema: z.ZodObject<{
         maxGasCost: z.ZodEffects<z.ZodString, string, string>;
         maxSlippageBps: z.ZodNumber;
         deadline: z.ZodNumber;
-        nonce: z.ZodString;
-        quoteId: z.ZodString;
+        nonce: z.ZodEffects<z.ZodString, string, string>;
+        quoteId: z.ZodEffects<z.ZodString, string, string>;
         metadataHash: z.ZodString;
         metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodType<JsonValue, z.ZodTypeDef, JsonValue>>>;
-    }, "strip", z.ZodTypeAny, {
+    }, "strict", z.ZodTypeAny, {
         value: string;
         application: string;
         gateway: string;
@@ -168,7 +170,7 @@ declare const SignedHyperEvmExecutionIntentSchema: z.ZodObject<{
     intentHash: z.ZodString;
     signature: z.ZodString;
     signer: z.ZodOptional<z.ZodString>;
-}, "strip", z.ZodTypeAny, {
+}, "strict", z.ZodTypeAny, {
     intent: {
         value: string;
         application: string;
@@ -236,11 +238,11 @@ declare const IntentDeclarationSchema: z.ZodObject<{
         maxGasCost: z.ZodEffects<z.ZodString, string, string>;
         maxSlippageBps: z.ZodNumber;
         deadline: z.ZodNumber;
-        nonce: z.ZodString;
-        quoteId: z.ZodString;
+        nonce: z.ZodEffects<z.ZodString, string, string>;
+        quoteId: z.ZodEffects<z.ZodString, string, string>;
         metadataHash: z.ZodString;
         metadata: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodType<JsonValue, z.ZodTypeDef, JsonValue>>>;
-    }, "strip", z.ZodTypeAny, {
+    }, "strict", z.ZodTypeAny, {
         value: string;
         application: string;
         gateway: string;
@@ -278,7 +280,7 @@ declare const IntentDeclarationSchema: z.ZodObject<{
         metadata?: Record<string, JsonValue> | undefined;
     }>;
     intentTemplateHash: z.ZodString;
-    quoteId: z.ZodString;
+    quoteId: z.ZodEffects<z.ZodString, string, string>;
 }, "strip", z.ZodTypeAny, {
     version: 2;
     quoteId: string;
@@ -341,7 +343,7 @@ declare const IntentPaymentExtraSchema: z.ZodObject<{
     version: z.ZodLiteral<2>;
     mode: z.ZodLiteral<"brokered">;
     intentTemplateHash: z.ZodString;
-    quoteId: z.ZodString;
+    quoteId: z.ZodEffects<z.ZodString, string, string>;
     applicationHash: z.ZodString;
     gateway: z.ZodString;
     chainId: z.ZodNumber;
@@ -418,7 +420,7 @@ declare const IntentExecutionReceiptSchema: z.ZodObject<{
     intentHash: z.ZodString;
     intentTemplateHash: z.ZodString;
     paymentRequirementsHash: z.ZodString;
-    quoteId: z.ZodString;
+    quoteId: z.ZodEffects<z.ZodString, string, string>;
     application: z.ZodString;
     gateway: z.ZodString;
     payer: z.ZodString;
@@ -760,4 +762,4 @@ declare function readIntentDeclaration(paymentRequired: PaymentRequired): Intent
 declare function attachSignedExecutionIntent(paymentPayload: PaymentPayload, signedIntent: SignedHyperEvmExecutionIntent): PaymentPayload;
 declare function readSignedExecutionIntent(paymentPayload: PaymentPayload): SignedHyperEvmExecutionIntent | undefined;
 
-export { Bytes32Schema, type CanonicalPaymentRequirements, DecimalIntegerStringSchema, EvmAddressSchema, type ExecutionIntentDomain, ExecutionIntentDomainSchema, type ExecutionIntentPaymentBinding, HexSchema, type HyperEvmExecutionIntent, type HyperEvmExecutionIntentInput, HyperEvmExecutionIntentSchema, IntentApplicationSchema, type IntentBindingFailure, type IntentBindingResult, type IntentDeclaration, type IntentDeclarationOptions, IntentDeclarationSchema, type IntentExecutionMode, IntentExecutionModeSchema, type IntentExecutionReceipt, IntentExecutionReceiptSchema, type IntentExecutionStatus, IntentExecutionStatusSchema, type IntentFailure, type IntentFailureReason, IntentFailureReasonSchema, IntentFailureSchema, type IntentPaymentExtra, IntentPaymentExtraSchema, type IntentSigner, JsonRecordSchema, type JsonValue, JsonValueSchema, NonZeroEvmAddressSchema, PositiveSafeIntegerSchema, type SignExecutionIntentOptions, type SignedHyperEvmExecutionIntent, SignedHyperEvmExecutionIntentSchema, TERMINAL_INTENT_EXECUTION_STATUSES, UINT256_MAX, X402_HL_INTENTS_EXTENSION, X402_HL_INTENTS_EXTRA_KEY, X402_HL_INTENT_DOMAIN_NAME, X402_HL_INTENT_DOMAIN_VERSION, X402_HL_INTENT_PRIMARY_TYPE, X402_HL_INTENT_TYPES, X402_HL_INTENT_VERSION, ZERO_ADDRESS, ZERO_BYTES32, attachSignedExecutionIntent, buildExecutionIntentTypedData, canonicalizePaymentRequirements, createIntentDeclaration, createIntentPaymentExtra, getIntentSignerAddress, hashExecutionIntent, hashExecutionIntentTemplate, hashIntentMetadata, hashIntentText, hashPaymentRequirements, isTerminalIntentExecutionStatus, normalizeBytes32, normalizeExecutionIntent, readIntentDeclaration, readIntentPaymentExtra, readSignedExecutionIntent, recoverExecutionIntentSigner, signExecutionIntent, stableJson, verifyExecutionIntentSignature, verifyIntentPaymentExtra };
+export { Bytes32Schema, type CanonicalPaymentRequirements, DecimalIntegerStringSchema, EvmAddressSchema, type ExecutionIntentDomain, ExecutionIntentDomainSchema, type ExecutionIntentPaymentBinding, HexSchema, type HyperEvmExecutionIntent, type HyperEvmExecutionIntentInput, HyperEvmExecutionIntentSchema, IntentApplicationSchema, type IntentBindingFailure, type IntentBindingResult, type IntentDeclaration, type IntentDeclarationOptions, IntentDeclarationSchema, type IntentExecutionMode, IntentExecutionModeSchema, type IntentExecutionReceipt, IntentExecutionReceiptSchema, type IntentExecutionStatus, IntentExecutionStatusSchema, type IntentFailure, type IntentFailureReason, IntentFailureReasonSchema, IntentFailureSchema, type IntentPaymentExtra, IntentPaymentExtraSchema, type IntentSigner, JsonRecordSchema, type JsonValue, JsonValueSchema, MAX_JSON_NESTING_DEPTH, NonZeroEvmAddressSchema, PositiveSafeIntegerSchema, type SignExecutionIntentOptions, type SignedHyperEvmExecutionIntent, SignedHyperEvmExecutionIntentSchema, TERMINAL_INTENT_EXECUTION_STATUSES, UINT256_MAX, X402_HL_INTENTS_EXTENSION, X402_HL_INTENTS_EXTRA_KEY, X402_HL_INTENT_DOMAIN_NAME, X402_HL_INTENT_DOMAIN_VERSION, X402_HL_INTENT_PRIMARY_TYPE, X402_HL_INTENT_TYPES, X402_HL_INTENT_VERSION, ZERO_ADDRESS, ZERO_BYTES32, attachSignedExecutionIntent, buildExecutionIntentTypedData, canonicalizePaymentRequirements, createIntentDeclaration, createIntentPaymentExtra, getIntentSignerAddress, hashExecutionIntent, hashExecutionIntentTemplate, hashIntentMetadata, hashIntentText, hashPaymentRequirements, isTerminalIntentExecutionStatus, isWellFormedUnicode, normalizeBytes32, normalizeExecutionIntent, readIntentDeclaration, readIntentPaymentExtra, readSignedExecutionIntent, recoverExecutionIntentSigner, signExecutionIntent, stableJson, verifyExecutionIntentSignature, verifyIntentPaymentExtra };

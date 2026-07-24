@@ -26,16 +26,30 @@ export type SignExecutionIntentOptions =
   | { paymentRequirements?: never; paymentRequirementsHash: Hex | string };
 
 export function getIntentSignerAddress(signer: IntentSigner): Address {
+  const explicitAddress = signer.address
+    ? getAddress(signer.address)
+    : undefined;
   const account = signer.account;
-  const address =
-    signer.address ??
-    (typeof account === "string" ? account : account?.address);
+  const accountValue =
+    typeof account === "string" ? account : account?.address;
+  const accountAddress = accountValue ? getAddress(accountValue) : undefined;
 
+  if (
+    explicitAddress &&
+    accountAddress &&
+    explicitAddress !== accountAddress
+  ) {
+    throw new Error(
+      "Intent signer address must match the configured signing account",
+    );
+  }
+
+  const address = explicitAddress ?? accountAddress;
   if (!address) {
     throw new Error("Intent signer is missing an EVM address");
   }
 
-  return getAddress(address);
+  return address;
 }
 
 export async function signExecutionIntent(
@@ -93,7 +107,9 @@ export async function verifyExecutionIntentSignature(
   const signer = await recoverExecutionIntentSigner(parsed);
   const valid =
     expectedHash.toLowerCase() === parsed.intentHash.toLowerCase() &&
-    signer === getAddress(parsed.intent.user);
+    signer === getAddress(parsed.intent.user) &&
+    (parsed.signer == null ||
+      signer.toLowerCase() === parsed.signer.toLowerCase());
 
   return { valid, signer, intentHash: expectedHash };
 }
@@ -114,11 +130,40 @@ async function signTypedDataWithSigner(
   try {
     return (await signer.signTypedData(typedData)) as Hex;
   } catch (error) {
-    const account = signer.account;
-    if (!account) throw error;
-    return (await signer.signTypedData({
-      ...typedData,
-      account,
-    })) as Hex;
+    if (!signer.account || isUserRejectedSigningError(error)) {
+      throw error;
+    }
   }
+
+  return (await signer.signTypedData({
+    ...typedData,
+    account: signer.account,
+  })) as Hex;
+}
+
+function isUserRejectedSigningError(error: unknown): boolean {
+  const visited = new Set<object>();
+  let current = error;
+
+  while (typeof current === "object" && current != null) {
+    if (visited.has(current)) return false;
+    visited.add(current);
+
+    const candidate = current as {
+      name?: unknown;
+      code?: unknown;
+      cause?: unknown;
+    };
+    if (
+      candidate.name === "UserRejectedRequestError" ||
+      candidate.code === 4001 ||
+      candidate.code === "4001" ||
+      candidate.code === "ACTION_REJECTED"
+    ) {
+      return true;
+    }
+    current = candidate.cause;
+  }
+
+  return false;
 }

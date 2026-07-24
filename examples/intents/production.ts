@@ -221,10 +221,12 @@ export async function signClientIntent(input: {
  * both writes transactionally and return the library conflict types.
  *
  * `insertPaid` atomically inserts either the primary intent payment or a
- * refund-only duplicate payment and maps `INSERT ... ON CONFLICT` results.
- * `compareAndSwap` uses the payment identity, revision, status, and claim token.
- * Both methods must return the row that won a conflict so a worker can
- * reconcile safely.
+ * refund-only duplicate payment and maps `INSERT ... ON CONFLICT` results. Its
+ * conflict target must use `x402_intent_payment_tx_canonical`, not only the raw
+ * primary key. `compareAndSwap` locates payment rows through
+ * `x402_canonical_transaction(payment_transaction)` before checking revision,
+ * status, and claim token. Both methods must return the row that won a conflict
+ * so a worker can reconcile safely.
  */
 export interface PostgresIntentTransaction {
   insertPaid(
@@ -240,6 +242,11 @@ export interface PostgresIntentDatabase {
     operation: (transaction: PostgresIntentTransaction) => Promise<T>,
   ): Promise<T>;
   findByIntentHash(intentHash: string): Promise<unknown | undefined>;
+  /**
+   * Compare the supplied canonical key to
+   * `x402_canonical_transaction(payment_transaction)`. Raw equality would miss
+   * a pre-migration padded row during a rolling deployment.
+   */
   findByPayment(
     paymentNetwork: string,
     paymentTransaction: string,
@@ -249,12 +256,29 @@ export interface PostgresIntentDatabase {
 /**
  * Representative schema for the PostgresIntentDatabase implementation.
  * Store the validated record as JSONB while duplicating concurrency/index keys.
+ * The SQL function intentionally matches ECMAScript trim plus ASCII case folding.
  */
-export const POSTGRES_INTENT_STORE_DDL = `
+export const POSTGRES_INTENT_STORE_DDL = String.raw`
+CREATE FUNCTION x402_canonical_transaction(value text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+SET search_path = pg_catalog
+AS $function$
+  SELECT pg_catalog.translate(
+    pg_catalog.btrim(value, U&'\0009\000A\000B\000C\000D\0020\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000\FEFF'),
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+    'abcdefghijklmnopqrstuvwxyz'
+  )
+$function$;
+
 CREATE TABLE x402_intent_payment (
   payment_network text NOT NULL,
   payment_transaction text NOT NULL
-    CHECK (payment_transaction = lower(payment_transaction)),
+    CONSTRAINT x402_payment_transaction_canonical
+    CHECK (payment_transaction = x402_canonical_transaction(payment_transaction)),
   intent_hash text NOT NULL CHECK (intent_hash = lower(intent_hash)),
   primary_payment boolean NOT NULL,
   application text NOT NULL,
@@ -262,29 +286,225 @@ CREATE TABLE x402_intent_payment (
   quote_id text NOT NULL,
   execution_network text,
   execution_transaction text
-    CHECK (execution_transaction IS NULL OR execution_transaction = lower(execution_transaction)),
+    CONSTRAINT x402_execution_transaction_canonical
+    CHECK (execution_transaction IS NULL OR execution_transaction = x402_canonical_transaction(execution_transaction)),
   refund_network text,
   refund_transaction text
-    CHECK (refund_transaction IS NULL OR refund_transaction = lower(refund_transaction)),
+    CONSTRAINT x402_refund_transaction_canonical
+    CHECK (refund_transaction IS NULL OR refund_transaction = x402_canonical_transaction(refund_transaction)),
   revision integer NOT NULL,
   status text NOT NULL,
   claim_token text,
   record jsonb NOT NULL,
   PRIMARY KEY (payment_network, payment_transaction)
 );
+CREATE UNIQUE INDEX x402_intent_payment_tx_canonical
+  ON x402_intent_payment (
+    payment_network,
+    x402_canonical_transaction(payment_transaction)
+  );
 CREATE UNIQUE INDEX x402_intent_primary
   ON x402_intent_payment (intent_hash)
   WHERE primary_payment;
 CREATE UNIQUE INDEX x402_intent_quote
-  ON x402_intent_payment (application, gateway, quote_id)
+  ON x402_intent_payment (application, lower(gateway), quote_id)
   WHERE primary_payment;
-CREATE UNIQUE INDEX x402_intent_execution_tx
-  ON x402_intent_payment (execution_network, execution_transaction)
+CREATE UNIQUE INDEX x402_intent_execution_tx_canonical
+  ON x402_intent_payment (
+    execution_network,
+    x402_canonical_transaction(execution_transaction)
+  )
   WHERE execution_transaction IS NOT NULL;
-CREATE UNIQUE INDEX x402_intent_refund_tx
-  ON x402_intent_payment (refund_network, refund_transaction)
+CREATE UNIQUE INDEX x402_intent_refund_tx_canonical
+  ON x402_intent_payment (
+    refund_network,
+    x402_canonical_transaction(refund_transaction)
+  )
   WHERE refund_transaction IS NOT NULL;
 `;
+
+/**
+ * Run this migration before deploying the canonicalizing adapter over an older
+ * table. It locks out writers, rejects ambiguous aliases or JSONB disagreement,
+ * and updates the indexed columns and stored record atomically.
+ */
+export const POSTGRES_INTENT_STORE_CANONICALIZATION_MIGRATION_DDL = String.raw`
+BEGIN;
+LOCK TABLE x402_intent_payment IN ACCESS EXCLUSIVE MODE;
+
+CREATE OR REPLACE FUNCTION x402_canonical_transaction(value text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+SET search_path = pg_catalog
+AS $function$
+  SELECT pg_catalog.translate(
+    pg_catalog.btrim(value, U&'\0009\000A\000B\000C\000D\0020\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000\FEFF'),
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+    'abcdefghijklmnopqrstuvwxyz'
+  )
+$function$;
+
+DO $migration$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM x402_intent_payment
+    GROUP BY payment_network, x402_canonical_transaction(payment_transaction)
+    HAVING count(*) > 1
+  ) THEN
+    RAISE EXCEPTION 'canonical payment transaction aliases require manual reconciliation';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM x402_intent_payment
+    WHERE execution_transaction IS NOT NULL
+    GROUP BY execution_network, x402_canonical_transaction(execution_transaction)
+    HAVING count(*) > 1
+  ) THEN
+    RAISE EXCEPTION 'canonical execution transaction aliases require manual reconciliation';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM x402_intent_payment
+    WHERE refund_transaction IS NOT NULL
+    GROUP BY refund_network, x402_canonical_transaction(refund_transaction)
+    HAVING count(*) > 1
+  ) THEN
+    RAISE EXCEPTION 'canonical refund transaction aliases require manual reconciliation';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM x402_intent_payment
+    WHERE x402_canonical_transaction(payment_transaction) = ''
+       OR (execution_transaction IS NOT NULL AND x402_canonical_transaction(execution_transaction) = '')
+       OR (refund_transaction IS NOT NULL AND x402_canonical_transaction(refund_transaction) = '')
+  ) THEN
+    RAISE EXCEPTION 'canonical transaction identifiers must not be empty';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM x402_intent_payment
+    WHERE x402_canonical_transaction(record->>'paymentTransaction')
+            IS DISTINCT FROM x402_canonical_transaction(payment_transaction)
+       OR x402_canonical_transaction(record->>'executionTransaction')
+            IS DISTINCT FROM x402_canonical_transaction(execution_transaction)
+       OR x402_canonical_transaction(record->>'refundTransaction')
+            IS DISTINCT FROM x402_canonical_transaction(refund_transaction)
+  ) THEN
+    RAISE EXCEPTION 'transaction columns and record JSON require manual reconciliation';
+  END IF;
+END
+$migration$;
+
+UPDATE x402_intent_payment
+SET payment_transaction = x402_canonical_transaction(payment_transaction),
+    execution_transaction = x402_canonical_transaction(execution_transaction),
+    refund_transaction = x402_canonical_transaction(refund_transaction),
+    record =
+      (record - 'paymentTransaction' - 'executionTransaction' - 'refundTransaction')
+      || jsonb_build_object(
+        'paymentTransaction',
+        x402_canonical_transaction(payment_transaction)
+      )
+      || CASE
+        WHEN execution_transaction IS NULL THEN '{}'::jsonb
+        ELSE jsonb_build_object(
+          'executionTransaction',
+          x402_canonical_transaction(execution_transaction)
+        )
+      END
+      || CASE
+        WHEN refund_transaction IS NULL THEN '{}'::jsonb
+        ELSE jsonb_build_object(
+          'refundTransaction',
+          x402_canonical_transaction(refund_transaction)
+        )
+      END;
+
+DROP INDEX x402_intent_quote;
+CREATE UNIQUE INDEX x402_intent_quote
+  ON x402_intent_payment (application, lower(gateway), quote_id)
+  WHERE primary_payment;
+CREATE UNIQUE INDEX x402_intent_payment_tx_canonical
+  ON x402_intent_payment (
+    payment_network,
+    x402_canonical_transaction(payment_transaction)
+  );
+CREATE UNIQUE INDEX x402_intent_execution_tx_canonical
+  ON x402_intent_payment (
+    execution_network,
+    x402_canonical_transaction(execution_transaction)
+  )
+  WHERE execution_transaction IS NOT NULL;
+CREATE UNIQUE INDEX x402_intent_refund_tx_canonical
+  ON x402_intent_payment (
+    refund_network,
+    x402_canonical_transaction(refund_transaction)
+  )
+  WHERE refund_transaction IS NOT NULL;
+
+ALTER TABLE x402_intent_payment
+  ADD CONSTRAINT x402_payment_transaction_canonical
+    CHECK (payment_transaction = x402_canonical_transaction(payment_transaction)),
+  ADD CONSTRAINT x402_execution_transaction_canonical
+    CHECK (execution_transaction IS NULL OR execution_transaction = x402_canonical_transaction(execution_transaction)),
+  ADD CONSTRAINT x402_refund_transaction_canonical
+    CHECK (refund_transaction IS NULL OR refund_transaction = x402_canonical_transaction(refund_transaction));
+COMMIT;
+`;
+
+function canonicalTransaction(value: string): string {
+  return value.trim().replace(/[A-Z]/g, character => character.toLowerCase());
+}
+
+function canonicalRecord(
+  input: IntentExecutionRecord,
+): IntentExecutionRecord {
+  return IntentExecutionRecordSchema.parse({
+    ...input,
+    paymentTransaction: canonicalTransaction(input.paymentTransaction),
+    executionTransaction: input.executionTransaction
+      ? canonicalTransaction(input.executionTransaction)
+      : undefined,
+    refundTransaction: input.refundTransaction
+      ? canonicalTransaction(input.refundTransaction)
+      : undefined,
+  });
+}
+
+function canonicalTransition(
+  input: IntentExecutionTransition,
+): IntentExecutionTransition {
+  const patch = input.patch
+    ? {
+        ...input.patch,
+        ...(input.patch.executionTransaction
+          ? {
+              executionTransaction: canonicalTransaction(
+                input.patch.executionTransaction,
+              ),
+            }
+          : {}),
+        ...(input.patch.refundTransaction
+          ? {
+              refundTransaction: canonicalTransaction(
+                input.patch.refundTransaction,
+              ),
+            }
+          : {}),
+      }
+    : undefined;
+  return "paymentTransaction" in input && input.paymentTransaction !== undefined
+    ? {
+        ...input,
+        paymentTransaction: canonicalTransaction(input.paymentTransaction),
+        patch,
+      }
+    : { ...input, patch };
+}
 
 export class PostgresIntentExecutionStore implements IntentExecutionStore {
   constructor(private readonly database: PostgresIntentDatabase) {}
@@ -292,7 +512,7 @@ export class PostgresIntentExecutionStore implements IntentExecutionStore {
   async registerPaid(
     input: IntentExecutionRecord,
   ): Promise<IntentStoreRegistrationResult> {
-    const record = IntentExecutionRecordSchema.parse(input);
+    const record = canonicalRecord(input);
     return this.database.transaction(transaction =>
       transaction.insertPaid(record),
     );
@@ -309,7 +529,7 @@ export class PostgresIntentExecutionStore implements IntentExecutionStore {
   ): Promise<IntentExecutionRecord | undefined> {
     const row = await this.database.findByPayment(
       paymentNetwork,
-      paymentTransaction.toLowerCase(),
+      canonicalTransaction(paymentTransaction),
     );
     return row == null ? undefined : IntentExecutionRecordSchema.parse(row);
   }
@@ -318,7 +538,7 @@ export class PostgresIntentExecutionStore implements IntentExecutionStore {
     transition: IntentExecutionTransition,
   ): Promise<IntentStoreTransitionResult> {
     return this.database.transaction(transaction =>
-      transaction.compareAndSwap(transition),
+      transaction.compareAndSwap(canonicalTransition(transition)),
     );
   }
 }

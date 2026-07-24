@@ -11,6 +11,24 @@ var HexRegex = /^0x(?:[0-9a-fA-F]{2})*$/;
 var Bytes32Regex = /^0x[0-9a-fA-F]{64}$/;
 var EvmAddressRegex = /^0x[0-9a-fA-F]{40}$/;
 var DecimalIntegerRegex = /^(0|[1-9]\d*)$/;
+var WellFormedUnicodeRegex = /^(?:[^\uD800-\uDFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF])*$/;
+function isWellFormedUnicode(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 55296 && codeUnit <= 56319) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 56320 && next <= 57343)) return false;
+      index += 1;
+    } else if (codeUnit >= 56320 && codeUnit <= 57343) {
+      return false;
+    }
+  }
+  return true;
+}
+var WellFormedTextOptions = {
+  message: "Text must contain well-formed Unicode"
+};
+var IntentTextIdentifierSchema = z.string().min(1).max(256).refine(isWellFormedUnicode, WellFormedTextOptions);
 var HexSchema = z.string().regex(HexRegex);
 var Bytes32Schema = z.string().regex(Bytes32Regex);
 var EvmAddressSchema = z.string().regex(EvmAddressRegex);
@@ -19,22 +37,29 @@ var NonZeroEvmAddressSchema = EvmAddressSchema.refine(
   "Address must not be the zero address"
 );
 var UINT256_MAX = (1n << 256n) - 1n;
-var DecimalIntegerStringSchema = z.string().max(78).regex(DecimalIntegerRegex).refine((value) => BigInt(value) <= UINT256_MAX, {
-  message: "Value exceeds the uint256 range"
-});
-var IntentApplicationSchema = z.string().trim().min(1).max(256);
+var UINT256_MAX_DECIMAL = UINT256_MAX.toString();
+var DecimalIntegerStringSchema = z.string().max(UINT256_MAX_DECIMAL.length).regex(DecimalIntegerRegex).refine(
+  (value) => !DecimalIntegerRegex.test(value) || value.length !== UINT256_MAX_DECIMAL.length || value <= UINT256_MAX_DECIMAL,
+  { message: "Value exceeds the uint256 range" }
+);
+var IntentApplicationSchema = z.string().trim().min(1).max(256).regex(WellFormedUnicodeRegex, WellFormedTextOptions);
 var PositiveSafeIntegerSchema = z.number().int().positive().safe();
-var JsonValueSchema = z.lazy(
-  () => z.union([
+var MAX_JSON_NESTING_DEPTH = 64;
+function createJsonValueSchema(remainingDepth) {
+  const scalar = z.union([
     z.null(),
     z.boolean(),
     z.number().finite(),
-    z.string(),
-    z.array(JsonValueSchema),
-    z.record(JsonValueSchema)
-  ])
+    z.string()
+  ]);
+  if (remainingDepth === 0) return scalar;
+  const child = createJsonValueSchema(remainingDepth - 1);
+  return z.union([scalar, z.array(child), z.record(child)]);
+}
+var JsonValueSchema = createJsonValueSchema(MAX_JSON_NESTING_DEPTH);
+var JsonRecordSchema = z.record(
+  createJsonValueSchema(MAX_JSON_NESTING_DEPTH - 1)
 );
-var JsonRecordSchema = z.record(JsonValueSchema);
 var IntentExecutionModeSchema = z.literal("brokered");
 var ExecutionIntentDomainSchema = z.object({
   application: IntentApplicationSchema,
@@ -54,31 +79,31 @@ var HyperEvmExecutionIntentSchema = z.object({
   maxGasCost: DecimalIntegerStringSchema,
   maxSlippageBps: z.number().int().min(0).max(1e4),
   deadline: PositiveSafeIntegerSchema,
-  nonce: z.string().min(1).max(256),
-  quoteId: z.string().min(1).max(256),
+  nonce: IntentTextIdentifierSchema,
+  quoteId: IntentTextIdentifierSchema,
   metadataHash: Bytes32Schema,
   metadata: JsonRecordSchema.optional()
-});
+}).strict();
 var SignedHyperEvmExecutionIntentSchema = z.object({
   intent: HyperEvmExecutionIntentSchema,
   paymentRequirementsHash: Bytes32Schema,
   intentHash: Bytes32Schema,
   signature: HexSchema,
   signer: EvmAddressSchema.optional()
-});
+}).strict();
 var IntentDeclarationSchema = z.object({
   version: z.literal(X402_HL_INTENT_VERSION),
   required: z.boolean(),
   mode: IntentExecutionModeSchema,
   intent: HyperEvmExecutionIntentSchema,
   intentTemplateHash: Bytes32Schema,
-  quoteId: z.string().min(1).max(256)
+  quoteId: IntentTextIdentifierSchema
 });
 var IntentPaymentExtraSchema = z.object({
   version: z.literal(X402_HL_INTENT_VERSION),
   mode: IntentExecutionModeSchema,
   intentTemplateHash: Bytes32Schema,
-  quoteId: z.string().min(1).max(256),
+  quoteId: IntentTextIdentifierSchema,
   applicationHash: Bytes32Schema,
   gateway: EvmAddressSchema,
   chainId: PositiveSafeIntegerSchema,
@@ -162,7 +187,7 @@ var IntentExecutionReceiptSchema = z.object({
   intentHash: Bytes32Schema,
   intentTemplateHash: Bytes32Schema,
   paymentRequirementsHash: Bytes32Schema,
-  quoteId: z.string().min(1).max(256),
+  quoteId: IntentTextIdentifierSchema,
   application: IntentApplicationSchema,
   gateway: EvmAddressSchema,
   payer: EvmAddressSchema,
@@ -201,9 +226,9 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 function stableJson(value) {
-  return serializeJson(value, /* @__PURE__ */ new Set());
+  return serializeJson(value, /* @__PURE__ */ new Set(), 0);
 }
-function serializeJson(value, ancestors) {
+function serializeJson(value, ancestors, depth) {
   if (value === null || typeof value === "boolean" || typeof value === "string") {
     return JSON.stringify(value);
   }
@@ -216,6 +241,11 @@ function serializeJson(value, ancestors) {
   if (typeof value !== "object") {
     throw new TypeError(`Value of type ${typeof value} is not valid JSON`);
   }
+  if (depth >= MAX_JSON_NESTING_DEPTH) {
+    throw new TypeError(
+      `JSON nesting exceeds the maximum depth of ${MAX_JSON_NESTING_DEPTH}`
+    );
+  }
   if (ancestors.has(value)) {
     throw new TypeError("Cyclic values are not valid JSON");
   }
@@ -227,7 +257,7 @@ function serializeJson(value, ancestors) {
           throw new TypeError("Sparse arrays are not valid JSON");
         }
       }
-      return `[${value.map((item) => serializeJson(item, ancestors)).join(",")}]`;
+      return `[${value.map((item) => serializeJson(item, ancestors, depth + 1)).join(",")}]`;
     }
     if (!isPlainObject(value)) {
       throw new TypeError("Only plain objects are valid JSON objects");
@@ -239,7 +269,7 @@ function serializeJson(value, ancestors) {
       if (entryValue === void 0) {
         throw new TypeError(`JSON object property ${key} is undefined`);
       }
-      return `${JSON.stringify(key)}:${serializeJson(entryValue, ancestors)}`;
+      return `${JSON.stringify(key)}:${serializeJson(entryValue, ancestors, depth + 1)}`;
     }).join(",")}}`;
   } finally {
     ancestors.delete(value);
@@ -309,6 +339,9 @@ function hashIntentMetadata(metadata) {
   return keccak256(stringToBytes(stableJson(metadata)));
 }
 function hashIntentText(value) {
+  if (!isWellFormedUnicode(value)) {
+    throw new TypeError("Intent text must contain well-formed Unicode");
+  }
   return keccak256(stringToBytes(value));
 }
 function normalizeBytes32(value) {
@@ -357,16 +390,19 @@ function hashExecutionIntentTemplate(input) {
 }
 
 // src/intents/payment.ts
+import { PaymentRequirementsV2Schema } from "@x402/core/schemas";
 import { getAddress as getAddress2, keccak256 as keccak2562, toBytes } from "viem";
 function canonicalizePaymentRequirements(requirements) {
+  const parsed = PaymentRequirementsV2Schema.parse(requirements);
+  const extra = requirements.extra == null ? {} : Object.fromEntries(Object.entries(requirements.extra));
   const canonical = {
-    scheme: requirements.scheme,
-    network: requirements.network,
-    asset: requirements.asset,
-    amount: requirements.amount,
-    payTo: requirements.payTo,
-    maxTimeoutSeconds: requirements.maxTimeoutSeconds,
-    extra: requirements.extra ?? {}
+    scheme: parsed.scheme,
+    network: parsed.network,
+    asset: parsed.asset,
+    amount: parsed.amount,
+    payTo: parsed.payTo,
+    maxTimeoutSeconds: parsed.maxTimeoutSeconds,
+    extra
   };
   stableJson(canonical);
   return canonical;
@@ -514,12 +550,20 @@ function bindingFailure(reason, message) {
 // src/intents/signature.ts
 import { getAddress as getAddress3, recoverTypedDataAddress } from "viem";
 function getIntentSignerAddress(signer) {
+  const explicitAddress = signer.address ? getAddress3(signer.address) : void 0;
   const account = signer.account;
-  const address = signer.address ?? (typeof account === "string" ? account : account?.address);
+  const accountValue = typeof account === "string" ? account : account?.address;
+  const accountAddress = accountValue ? getAddress3(accountValue) : void 0;
+  if (explicitAddress && accountAddress && explicitAddress !== accountAddress) {
+    throw new Error(
+      "Intent signer address must match the configured signing account"
+    );
+  }
+  const address = explicitAddress ?? accountAddress;
   if (!address) {
     throw new Error("Intent signer is missing an EVM address");
   }
-  return getAddress3(address);
+  return address;
 }
 async function signExecutionIntent(input, signer, options) {
   const signerAddress = getIntentSignerAddress(signer);
@@ -560,7 +604,7 @@ async function verifyExecutionIntentSignature(signedIntent) {
     paymentRequirementsHash: parsed.paymentRequirementsHash
   });
   const signer = await recoverExecutionIntentSigner(parsed);
-  const valid = expectedHash.toLowerCase() === parsed.intentHash.toLowerCase() && signer === getAddress3(parsed.intent.user);
+  const valid = expectedHash.toLowerCase() === parsed.intentHash.toLowerCase() && signer === getAddress3(parsed.intent.user) && (parsed.signer == null || signer.toLowerCase() === parsed.signer.toLowerCase());
   return { valid, signer, intentHash: expectedHash };
 }
 function resolvePaymentRequirementsHash(options) {
@@ -573,16 +617,39 @@ async function signTypedDataWithSigner(signer, typedData) {
   try {
     return await signer.signTypedData(typedData);
   } catch (error) {
-    const account = signer.account;
-    if (!account) throw error;
-    return await signer.signTypedData({
-      ...typedData,
-      account
-    });
+    if (!signer.account || isUserRejectedSigningError(error)) {
+      throw error;
+    }
   }
+  return await signer.signTypedData({
+    ...typedData,
+    account: signer.account
+  });
+}
+function isUserRejectedSigningError(error) {
+  const visited = /* @__PURE__ */ new Set();
+  let current = error;
+  while (typeof current === "object" && current != null) {
+    if (visited.has(current)) return false;
+    visited.add(current);
+    const candidate = current;
+    if (candidate.name === "UserRejectedRequestError" || candidate.code === 4001 || candidate.code === "4001" || candidate.code === "ACTION_REJECTED") {
+      return true;
+    }
+    current = candidate.cause;
+  }
+  return false;
 }
 
 // src/intents/extension.ts
+import { z as z2 } from "zod";
+var PaymentSignedExecutionIntentSchema = SignedHyperEvmExecutionIntentSchema.extend({
+  version: z2.literal(X402_HL_INTENT_VERSION).optional(),
+  required: z2.boolean().optional(),
+  mode: z2.literal("brokered").optional(),
+  intentTemplateHash: Bytes32Schema.optional(),
+  quoteId: z2.string().optional()
+}).strict();
 function createIntentDeclaration(input, options = {}) {
   const intent = normalizeExecutionIntent(input);
   return IntentDeclarationSchema.parse({
@@ -617,9 +684,36 @@ function attachSignedExecutionIntent(paymentPayload, signedIntent) {
   };
 }
 function readSignedExecutionIntent(paymentPayload) {
-  const signedIntent = paymentPayload.extensions?.[X402_HL_INTENTS_EXTENSION];
-  if (signedIntent == null) return void 0;
-  return SignedHyperEvmExecutionIntentSchema.parse(signedIntent);
+  const extension = paymentPayload.extensions?.[X402_HL_INTENTS_EXTENSION];
+  if (extension == null) return void 0;
+  const declarationOnly = IntentDeclarationSchema.strict().safeParse(extension);
+  if (declarationOnly.success && !declarationOnly.data.required) {
+    const declaration = declarationOnly.data;
+    if (declaration.intentTemplateHash.toLowerCase() !== hashExecutionIntentTemplate(declaration.intent).toLowerCase()) {
+      throw new Error("Intent declaration template hash is invalid");
+    }
+    if (declaration.quoteId !== declaration.intent.quoteId) {
+      throw new Error("Intent declaration quote id is invalid");
+    }
+    return void 0;
+  }
+  const parsed = PaymentSignedExecutionIntentSchema.parse(extension);
+  const intent = normalizeExecutionIntent(
+    extension.intent
+  );
+  if (parsed.intentTemplateHash != null && parsed.intentTemplateHash.toLowerCase() !== hashExecutionIntentTemplate(intent).toLowerCase()) {
+    throw new Error("Intent declaration template hash is invalid");
+  }
+  if (parsed.quoteId != null && parsed.quoteId !== intent.quoteId) {
+    throw new Error("Intent declaration quote id is invalid");
+  }
+  return SignedHyperEvmExecutionIntentSchema.parse({
+    intent,
+    paymentRequirementsHash: parsed.paymentRequirementsHash,
+    intentHash: parsed.intentHash,
+    signature: parsed.signature,
+    signer: parsed.signer
+  });
 }
 export {
   Bytes32Schema,
@@ -638,6 +732,7 @@ export {
   IntentPaymentExtraSchema,
   JsonRecordSchema,
   JsonValueSchema,
+  MAX_JSON_NESTING_DEPTH,
   NonZeroEvmAddressSchema,
   PositiveSafeIntegerSchema,
   SignedHyperEvmExecutionIntentSchema,
@@ -664,6 +759,7 @@ export {
   hashIntentText,
   hashPaymentRequirements,
   isTerminalIntentExecutionStatus,
+  isWellFormedUnicode,
   normalizeBytes32,
   normalizeExecutionIntent,
   readIntentDeclaration,

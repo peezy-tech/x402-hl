@@ -11,6 +11,24 @@ var HexRegex = /^0x(?:[0-9a-fA-F]{2})*$/;
 var Bytes32Regex = /^0x[0-9a-fA-F]{64}$/;
 var EvmAddressRegex = /^0x[0-9a-fA-F]{40}$/;
 var DecimalIntegerRegex = /^(0|[1-9]\d*)$/;
+var WellFormedUnicodeRegex = /^(?:[^\uD800-\uDFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF])*$/;
+function isWellFormedUnicode(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 55296 && codeUnit <= 56319) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 56320 && next <= 57343)) return false;
+      index += 1;
+    } else if (codeUnit >= 56320 && codeUnit <= 57343) {
+      return false;
+    }
+  }
+  return true;
+}
+var WellFormedTextOptions = {
+  message: "Text must contain well-formed Unicode"
+};
+var IntentTextIdentifierSchema = z.string().min(1).max(256).refine(isWellFormedUnicode, WellFormedTextOptions);
 var HexSchema = z.string().regex(HexRegex);
 var Bytes32Schema = z.string().regex(Bytes32Regex);
 var EvmAddressSchema = z.string().regex(EvmAddressRegex);
@@ -19,22 +37,29 @@ var NonZeroEvmAddressSchema = EvmAddressSchema.refine(
   "Address must not be the zero address"
 );
 var UINT256_MAX = (1n << 256n) - 1n;
-var DecimalIntegerStringSchema = z.string().max(78).regex(DecimalIntegerRegex).refine((value) => BigInt(value) <= UINT256_MAX, {
-  message: "Value exceeds the uint256 range"
-});
-var IntentApplicationSchema = z.string().trim().min(1).max(256);
+var UINT256_MAX_DECIMAL = UINT256_MAX.toString();
+var DecimalIntegerStringSchema = z.string().max(UINT256_MAX_DECIMAL.length).regex(DecimalIntegerRegex).refine(
+  (value) => !DecimalIntegerRegex.test(value) || value.length !== UINT256_MAX_DECIMAL.length || value <= UINT256_MAX_DECIMAL,
+  { message: "Value exceeds the uint256 range" }
+);
+var IntentApplicationSchema = z.string().trim().min(1).max(256).regex(WellFormedUnicodeRegex, WellFormedTextOptions);
 var PositiveSafeIntegerSchema = z.number().int().positive().safe();
-var JsonValueSchema = z.lazy(
-  () => z.union([
+var MAX_JSON_NESTING_DEPTH = 64;
+function createJsonValueSchema(remainingDepth) {
+  const scalar = z.union([
     z.null(),
     z.boolean(),
     z.number().finite(),
-    z.string(),
-    z.array(JsonValueSchema),
-    z.record(JsonValueSchema)
-  ])
+    z.string()
+  ]);
+  if (remainingDepth === 0) return scalar;
+  const child = createJsonValueSchema(remainingDepth - 1);
+  return z.union([scalar, z.array(child), z.record(child)]);
+}
+var JsonValueSchema = createJsonValueSchema(MAX_JSON_NESTING_DEPTH);
+var JsonRecordSchema = z.record(
+  createJsonValueSchema(MAX_JSON_NESTING_DEPTH - 1)
 );
-var JsonRecordSchema = z.record(JsonValueSchema);
 var IntentExecutionModeSchema = z.literal("brokered");
 var ExecutionIntentDomainSchema = z.object({
   application: IntentApplicationSchema,
@@ -54,31 +79,31 @@ var HyperEvmExecutionIntentSchema = z.object({
   maxGasCost: DecimalIntegerStringSchema,
   maxSlippageBps: z.number().int().min(0).max(1e4),
   deadline: PositiveSafeIntegerSchema,
-  nonce: z.string().min(1).max(256),
-  quoteId: z.string().min(1).max(256),
+  nonce: IntentTextIdentifierSchema,
+  quoteId: IntentTextIdentifierSchema,
   metadataHash: Bytes32Schema,
   metadata: JsonRecordSchema.optional()
-});
+}).strict();
 var SignedHyperEvmExecutionIntentSchema = z.object({
   intent: HyperEvmExecutionIntentSchema,
   paymentRequirementsHash: Bytes32Schema,
   intentHash: Bytes32Schema,
   signature: HexSchema,
   signer: EvmAddressSchema.optional()
-});
+}).strict();
 var IntentDeclarationSchema = z.object({
   version: z.literal(X402_HL_INTENT_VERSION),
   required: z.boolean(),
   mode: IntentExecutionModeSchema,
   intent: HyperEvmExecutionIntentSchema,
   intentTemplateHash: Bytes32Schema,
-  quoteId: z.string().min(1).max(256)
+  quoteId: IntentTextIdentifierSchema
 });
 var IntentPaymentExtraSchema = z.object({
   version: z.literal(X402_HL_INTENT_VERSION),
   mode: IntentExecutionModeSchema,
   intentTemplateHash: Bytes32Schema,
-  quoteId: z.string().min(1).max(256),
+  quoteId: IntentTextIdentifierSchema,
   applicationHash: Bytes32Schema,
   gateway: EvmAddressSchema,
   chainId: PositiveSafeIntegerSchema,
@@ -162,7 +187,7 @@ var IntentExecutionReceiptSchema = z.object({
   intentHash: Bytes32Schema,
   intentTemplateHash: Bytes32Schema,
   paymentRequirementsHash: Bytes32Schema,
-  quoteId: z.string().min(1).max(256),
+  quoteId: IntentTextIdentifierSchema,
   application: IntentApplicationSchema,
   gateway: EvmAddressSchema,
   payer: EvmAddressSchema,
@@ -201,9 +226,9 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 function stableJson(value) {
-  return serializeJson(value, /* @__PURE__ */ new Set());
+  return serializeJson(value, /* @__PURE__ */ new Set(), 0);
 }
-function serializeJson(value, ancestors) {
+function serializeJson(value, ancestors, depth) {
   if (value === null || typeof value === "boolean" || typeof value === "string") {
     return JSON.stringify(value);
   }
@@ -216,6 +241,11 @@ function serializeJson(value, ancestors) {
   if (typeof value !== "object") {
     throw new TypeError(`Value of type ${typeof value} is not valid JSON`);
   }
+  if (depth >= MAX_JSON_NESTING_DEPTH) {
+    throw new TypeError(
+      `JSON nesting exceeds the maximum depth of ${MAX_JSON_NESTING_DEPTH}`
+    );
+  }
   if (ancestors.has(value)) {
     throw new TypeError("Cyclic values are not valid JSON");
   }
@@ -227,7 +257,7 @@ function serializeJson(value, ancestors) {
           throw new TypeError("Sparse arrays are not valid JSON");
         }
       }
-      return `[${value.map((item) => serializeJson(item, ancestors)).join(",")}]`;
+      return `[${value.map((item) => serializeJson(item, ancestors, depth + 1)).join(",")}]`;
     }
     if (!isPlainObject(value)) {
       throw new TypeError("Only plain objects are valid JSON objects");
@@ -239,7 +269,7 @@ function serializeJson(value, ancestors) {
       if (entryValue === void 0) {
         throw new TypeError(`JSON object property ${key} is undefined`);
       }
-      return `${JSON.stringify(key)}:${serializeJson(entryValue, ancestors)}`;
+      return `${JSON.stringify(key)}:${serializeJson(entryValue, ancestors, depth + 1)}`;
     }).join(",")}}`;
   } finally {
     ancestors.delete(value);
@@ -309,6 +339,9 @@ function hashIntentMetadata(metadata) {
   return keccak256(stringToBytes(stableJson(metadata)));
 }
 function hashIntentText(value) {
+  if (!isWellFormedUnicode(value)) {
+    throw new TypeError("Intent text must contain well-formed Unicode");
+  }
   return keccak256(stringToBytes(value));
 }
 function normalizeBytes32(value) {
@@ -357,16 +390,19 @@ function hashExecutionIntentTemplate(input) {
 }
 
 // src/intents/payment.ts
+import { PaymentRequirementsV2Schema } from "@x402/core/schemas";
 import { getAddress as getAddress2, keccak256 as keccak2562, toBytes } from "viem";
 function canonicalizePaymentRequirements(requirements) {
+  const parsed = PaymentRequirementsV2Schema.parse(requirements);
+  const extra = requirements.extra == null ? {} : Object.fromEntries(Object.entries(requirements.extra));
   const canonical = {
-    scheme: requirements.scheme,
-    network: requirements.network,
-    asset: requirements.asset,
-    amount: requirements.amount,
-    payTo: requirements.payTo,
-    maxTimeoutSeconds: requirements.maxTimeoutSeconds,
-    extra: requirements.extra ?? {}
+    scheme: parsed.scheme,
+    network: parsed.network,
+    asset: parsed.asset,
+    amount: parsed.amount,
+    payTo: parsed.payTo,
+    maxTimeoutSeconds: parsed.maxTimeoutSeconds,
+    extra
   };
   stableJson(canonical);
   return canonical;
@@ -514,12 +550,20 @@ function bindingFailure(reason, message) {
 // src/intents/signature.ts
 import { getAddress as getAddress3, recoverTypedDataAddress } from "viem";
 function getIntentSignerAddress(signer) {
+  const explicitAddress = signer.address ? getAddress3(signer.address) : void 0;
   const account = signer.account;
-  const address = signer.address ?? (typeof account === "string" ? account : account?.address);
+  const accountValue = typeof account === "string" ? account : account?.address;
+  const accountAddress = accountValue ? getAddress3(accountValue) : void 0;
+  if (explicitAddress && accountAddress && explicitAddress !== accountAddress) {
+    throw new Error(
+      "Intent signer address must match the configured signing account"
+    );
+  }
+  const address = explicitAddress ?? accountAddress;
   if (!address) {
     throw new Error("Intent signer is missing an EVM address");
   }
-  return getAddress3(address);
+  return address;
 }
 async function signExecutionIntent(input, signer, options) {
   const signerAddress = getIntentSignerAddress(signer);
@@ -560,7 +604,7 @@ async function verifyExecutionIntentSignature(signedIntent) {
     paymentRequirementsHash: parsed.paymentRequirementsHash
   });
   const signer = await recoverExecutionIntentSigner(parsed);
-  const valid = expectedHash.toLowerCase() === parsed.intentHash.toLowerCase() && signer === getAddress3(parsed.intent.user);
+  const valid = expectedHash.toLowerCase() === parsed.intentHash.toLowerCase() && signer === getAddress3(parsed.intent.user) && (parsed.signer == null || signer.toLowerCase() === parsed.signer.toLowerCase());
   return { valid, signer, intentHash: expectedHash };
 }
 function resolvePaymentRequirementsHash(options) {
@@ -573,16 +617,39 @@ async function signTypedDataWithSigner(signer, typedData) {
   try {
     return await signer.signTypedData(typedData);
   } catch (error) {
-    const account = signer.account;
-    if (!account) throw error;
-    return await signer.signTypedData({
-      ...typedData,
-      account
-    });
+    if (!signer.account || isUserRejectedSigningError(error)) {
+      throw error;
+    }
   }
+  return await signer.signTypedData({
+    ...typedData,
+    account: signer.account
+  });
+}
+function isUserRejectedSigningError(error) {
+  const visited = /* @__PURE__ */ new Set();
+  let current = error;
+  while (typeof current === "object" && current != null) {
+    if (visited.has(current)) return false;
+    visited.add(current);
+    const candidate = current;
+    if (candidate.name === "UserRejectedRequestError" || candidate.code === 4001 || candidate.code === "4001" || candidate.code === "ACTION_REJECTED") {
+      return true;
+    }
+    current = candidate.cause;
+  }
+  return false;
 }
 
 // src/intents/extension.ts
+import { z as z2 } from "zod";
+var PaymentSignedExecutionIntentSchema = SignedHyperEvmExecutionIntentSchema.extend({
+  version: z2.literal(X402_HL_INTENT_VERSION).optional(),
+  required: z2.boolean().optional(),
+  mode: z2.literal("brokered").optional(),
+  intentTemplateHash: Bytes32Schema.optional(),
+  quoteId: z2.string().optional()
+}).strict();
 function createIntentDeclaration(input, options = {}) {
   const intent = normalizeExecutionIntent(input);
   return IntentDeclarationSchema.parse({
@@ -617,9 +684,36 @@ function attachSignedExecutionIntent(paymentPayload, signedIntent) {
   };
 }
 function readSignedExecutionIntent(paymentPayload) {
-  const signedIntent = paymentPayload.extensions?.[X402_HL_INTENTS_EXTENSION];
-  if (signedIntent == null) return void 0;
-  return SignedHyperEvmExecutionIntentSchema.parse(signedIntent);
+  const extension = paymentPayload.extensions?.[X402_HL_INTENTS_EXTENSION];
+  if (extension == null) return void 0;
+  const declarationOnly = IntentDeclarationSchema.strict().safeParse(extension);
+  if (declarationOnly.success && !declarationOnly.data.required) {
+    const declaration = declarationOnly.data;
+    if (declaration.intentTemplateHash.toLowerCase() !== hashExecutionIntentTemplate(declaration.intent).toLowerCase()) {
+      throw new Error("Intent declaration template hash is invalid");
+    }
+    if (declaration.quoteId !== declaration.intent.quoteId) {
+      throw new Error("Intent declaration quote id is invalid");
+    }
+    return void 0;
+  }
+  const parsed = PaymentSignedExecutionIntentSchema.parse(extension);
+  const intent = normalizeExecutionIntent(
+    extension.intent
+  );
+  if (parsed.intentTemplateHash != null && parsed.intentTemplateHash.toLowerCase() !== hashExecutionIntentTemplate(intent).toLowerCase()) {
+    throw new Error("Intent declaration template hash is invalid");
+  }
+  if (parsed.quoteId != null && parsed.quoteId !== intent.quoteId) {
+    throw new Error("Intent declaration quote id is invalid");
+  }
+  return SignedHyperEvmExecutionIntentSchema.parse({
+    intent,
+    paymentRequirementsHash: parsed.paymentRequirementsHash,
+    intentHash: parsed.intentHash,
+    signature: parsed.signature,
+    signer: parsed.signer
+  });
 }
 
 // src/intents/server/quote.ts
@@ -668,8 +762,274 @@ function createIntentQuote(input) {
 }
 
 // src/intents/server/verification.ts
-import { getAddress as getAddress4 } from "viem";
+import { getAddress as getAddress5 } from "viem";
+
+// src/exact/facilitator/verification.ts
+import { SendAssetTypes } from "@nktkas/hyperliquid/api/exchange";
+import { getAddress as getAddress4, recoverTypedDataAddress as recoverTypedDataAddress2 } from "viem";
+
+// src/types.ts
+import { z as z3 } from "zod";
+var HyperliquidTokenIdRegex = /^[^:]+:0x[0-9a-fA-F]{32,40}$/;
+var Bytes32Regex2 = /^0x[0-9a-fA-F]{64}$/;
+var EvmAddressRegex2 = /^0x[0-9a-fA-F]{40}$/;
+var HexIntegerRegex = /^0x[0-9a-fA-F]+$/;
+var DecimalAmountRegex = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
+var ExactHyperliquidPayloadSchema = z3.object({
+  action: z3.object({
+    type: z3.literal("sendAsset"),
+    signatureChainId: z3.string().regex(HexIntegerRegex),
+    hyperliquidChain: z3.enum(["Mainnet", "Testnet"]),
+    destination: z3.string().regex(EvmAddressRegex2),
+    sourceDex: z3.literal("spot"),
+    destinationDex: z3.literal("spot"),
+    token: z3.string().regex(HyperliquidTokenIdRegex),
+    amount: z3.string().regex(DecimalAmountRegex),
+    fromSubAccount: z3.literal(""),
+    nonce: z3.number().int().nonnegative().safe()
+  }).strict(),
+  signature: z3.object({
+    r: z3.string().regex(Bytes32Regex2),
+    s: z3.string().regex(Bytes32Regex2),
+    v: z3.union([z3.literal(27), z3.literal(28)])
+  }).strict(),
+  nonce: z3.number().int().nonnegative().safe(),
+  user: z3.string().regex(EvmAddressRegex2)
+}).strict();
+
+// src/utils.ts
+import * as hl from "@nktkas/hyperliquid";
+
+// src/constants.ts
+import { toHex } from "viem";
+import { arbitrum } from "viem/chains";
+var HYPERLIQUID_MAINNET = "hyperliquid:mainnet";
+var HYPERLIQUID_TESTNET = "hyperliquid:testnet";
+var SupportedHyperliquidNetworks = [
+  HYPERLIQUID_TESTNET,
+  HYPERLIQUID_MAINNET
+];
+var HyperliquidNetworkToChainName = {
+  [HYPERLIQUID_TESTNET]: "Testnet",
+  [HYPERLIQUID_MAINNET]: "Mainnet"
+};
+var HyperliquidNetworkConfigs = {
+  [HYPERLIQUID_TESTNET]: {
+    token: "USDC:0xeb62eee3685fc4c43992febcd9e75443",
+    decimals: 8,
+    signatureChainId: toHex(arbitrum.id)
+  },
+  [HYPERLIQUID_MAINNET]: {
+    token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+    decimals: 8,
+    signatureChainId: toHex(arbitrum.id)
+  }
+};
+
+// src/utils.ts
+function assertHyperliquidNetwork(network) {
+  if (!network.startsWith("hyperliquid:") || !SupportedHyperliquidNetworks.includes(network)) {
+    throw new Error(`Unsupported Hyperliquid network: ${network}`);
+  }
+}
+function getHyperliquidChainName(network) {
+  assertHyperliquidNetwork(network);
+  return HyperliquidNetworkToChainName[network];
+}
+function createInfoClient(network, options) {
+  assertHyperliquidNetwork(network);
+  const transport = new hl.HttpTransport({
+    ...options,
+    isTestnet: network === HYPERLIQUID_TESTNET
+  });
+  return new hl.InfoClient({ transport });
+}
+var tokenInfoCache = /* @__PURE__ */ new Map();
+async function fetchHyperliquidTokenInfo(network, tokenId, signal) {
+  assertHyperliquidNetwork(network);
+  const cacheKey = `${network}:${tokenId.toLowerCase()}`;
+  const cached = tokenInfoCache.get(cacheKey);
+  if (cached) return cached;
+  const client = createInfoClient(network);
+  const response = await client.tokenDetails(
+    { tokenId },
+    signal
+  );
+  const info = {
+    decimals: response.weiDecimals,
+    symbol: response.name,
+    name: response.name,
+    tokenId
+  };
+  tokenInfoCache.set(cacheKey, info);
+  return info;
+}
+
+// src/exact/facilitator/verification.ts
+var MAX_CLOCK_SKEW_MS = 30 * 1e3;
+async function verifyExactHyperliquidPayment(payload, requirements, options) {
+  if (payload.x402Version !== 2) {
+    return { isValid: false, invalidReason: "invalid_x402_version" };
+  }
+  if (payload.accepted?.scheme !== "exact" || requirements.scheme !== "exact") {
+    return { isValid: false, invalidReason: "unsupported_scheme" };
+  }
+  if (payload.accepted?.network !== requirements.network) {
+    return { isValid: false, invalidReason: "network_mismatch" };
+  }
+  if (!paymentRequirementsMatch(payload.accepted, requirements)) {
+    return { isValid: false, invalidReason: "invalid_exact_hl_payload" };
+  }
+  if (!SupportedHyperliquidNetworks.includes(requirements.network)) {
+    return { isValid: false, invalidReason: "invalid_exact_hl_network" };
+  }
+  const parsed = ExactHyperliquidPayloadSchema.safeParse(payload.payload);
+  if (!parsed.success) {
+    return { isValid: false, invalidReason: "invalid_exact_hl_payload" };
+  }
+  const exactPayload = parsed.data;
+  const action = exactPayload.action;
+  if (action.hyperliquidChain !== getHyperliquidChainName(requirements.network)) {
+    return {
+      isValid: false,
+      invalidReason: "invalid_exact_hl_payload_chain_mismatch"
+    };
+  }
+  if (action.nonce !== exactPayload.nonce) {
+    return {
+      isValid: false,
+      invalidReason: "invalid_exact_hl_payload_nonce_mismatch"
+    };
+  }
+  if (action.destination.toLowerCase() !== requirements.payTo.toLowerCase()) {
+    return {
+      isValid: false,
+      invalidReason: "invalid_exact_hl_payload_recipient_mismatch"
+    };
+  }
+  if (!tokenMatchesRequirements(action.token, requirements.asset)) {
+    return {
+      isValid: false,
+      invalidReason: "invalid_exact_hl_payload_asset_mismatch"
+    };
+  }
+  if (!(options.validateTtl ?? validateTtl)(
+    action.nonce,
+    requirements.maxTimeoutSeconds,
+    options.allowExpired
+  )) {
+    return { isValid: false, invalidReason: "payment_expired" };
+  }
+  const decimals = await resolveDecimals(requirements);
+  if (!validateAmount(action.amount, requirements.amount, decimals)) {
+    return {
+      isValid: false,
+      invalidReason: "invalid_exact_hl_payload_amount_mismatch"
+    };
+  }
+  try {
+    const recoveredPayer = getAddress4(
+      await recoverTypedDataAddress2({
+        domain: {
+          name: "HyperliquidSignTransaction",
+          version: "1",
+          chainId: BigInt(action.signatureChainId),
+          verifyingContract: "0x0000000000000000000000000000000000000000"
+        },
+        types: SendAssetTypes,
+        primaryType: "HyperliquidTransaction:SendAsset",
+        message: action,
+        signature: {
+          r: exactPayload.signature.r,
+          s: exactPayload.signature.s,
+          yParity: exactPayload.signature.v - 27
+        }
+      })
+    );
+    if (recoveredPayer !== getAddress4(exactPayload.user)) {
+      return {
+        isValid: false,
+        invalidReason: "invalid_exact_hl_payload_signer_mismatch"
+      };
+    }
+    return { isValid: true, payer: recoveredPayer };
+  } catch {
+    return {
+      isValid: false,
+      invalidReason: "invalid_exact_hl_payload_signature"
+    };
+  }
+}
+async function resolveDecimals(requirements, signal) {
+  if (typeof requirements.extra?.decimals === "number") {
+    return requirements.extra.decimals;
+  }
+  const tokenId = extractTokenId(requirements.asset);
+  if (!tokenId) return void 0;
+  try {
+    const info = await fetchHyperliquidTokenInfo(
+      requirements.network,
+      tokenId,
+      signal
+    );
+    return info.decimals;
+  } catch {
+    return void 0;
+  }
+}
+function tokenMatchesRequirements(payloadToken, requiredAsset) {
+  if (payloadToken === requiredAsset) return true;
+  const payloadTokenId = extractTokenId(payloadToken)?.toLowerCase();
+  const requiredTokenId = extractTokenId(requiredAsset)?.toLowerCase();
+  return Boolean(
+    payloadTokenId && requiredTokenId && payloadTokenId === requiredTokenId
+  );
+}
+function validateAmount(payloadAmount, requiredAmount, decimals) {
+  if (decimals == null || decimals < 0) {
+    return normalizeDecimal(payloadAmount) === normalizeDecimal(requiredAmount);
+  }
+  try {
+    return decimalToAtomic(payloadAmount, decimals) === BigInt(requiredAmount);
+  } catch {
+    return false;
+  }
+}
+function decimalToAtomic(value, decimals) {
+  const match = /^(\d+)(?:\.(\d+))?$/.exec(value.trim());
+  if (!match) throw new Error("invalid decimal amount");
+  const [, whole, fraction = ""] = match;
+  if (/[1-9]/.test(fraction.slice(decimals))) {
+    throw new Error("decimal amount exceeds token precision");
+  }
+  const normalizedFraction = fraction.slice(0, decimals).padEnd(decimals, "0");
+  return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(normalizedFraction || "0");
+}
+function validateTtl(actionTime, maxTimeoutSeconds, allowExpired = false) {
+  if (typeof actionTime !== "number") return false;
+  const now = Date.now();
+  return actionTime <= now + MAX_CLOCK_SKEW_MS && (allowExpired || now <= actionTime + maxTimeoutSeconds * 1e3);
+}
+function extractTokenId(asset) {
+  if (!asset) return void 0;
+  const parts = asset.split(":");
+  return parts.length === 2 ? parts[1] : parts[0]?.startsWith("0x") ? parts[0] : void 0;
+}
+function paymentRequirementsMatch(accepted, required) {
+  if (typeof accepted.payTo !== "string" || typeof required.payTo !== "string") {
+    return false;
+  }
+  return accepted.scheme === required.scheme && accepted.network === required.network && accepted.asset === required.asset && accepted.amount === required.amount && accepted.payTo.toLowerCase() === required.payTo.toLowerCase() && accepted.maxTimeoutSeconds === required.maxTimeoutSeconds;
+}
+function normalizeDecimal(value) {
+  return value.trim().replace(/^0+(?=\d)/, "").replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+}
+
+// src/intents/server/verification.ts
 async function verifyPreSettlementExecutionIntent(input) {
+  return verifyExecutionIntent(input, { allowExpiredPayment: false });
+}
+async function verifyExecutionIntent(input, options) {
   let paymentRequirementsHash;
   let acceptedHash;
   try {
@@ -687,23 +1047,21 @@ async function verifyPreSettlementExecutionIntent(input) {
       "Payment payload accepted different requirements than the server finalized"
     );
   }
-  const rawSignedIntent = input.paymentPayload.extensions?.["x402-hl/intents"];
-  if (rawSignedIntent == null) {
-    return failure(
-      "missing_execution_intent",
-      "Payment payload does not include an x402-hl execution intent"
-    );
-  }
-  const parsedSignedIntent = SignedHyperEvmExecutionIntentSchema.safeParse(
-    rawSignedIntent
-  );
-  if (!parsedSignedIntent.success) {
+  let signedIntent;
+  try {
+    signedIntent = readSignedExecutionIntent(input.paymentPayload);
+  } catch {
     return failure(
       "malformed_extension_payload",
       "Payment payload contains a malformed x402-hl execution intent"
     );
   }
-  const signedIntent = parsedSignedIntent.data;
+  if (!signedIntent) {
+    return failure(
+      "missing_execution_intent",
+      "Payment payload does not include an x402-hl execution intent"
+    );
+  }
   const intent = signedIntent.intent;
   try {
     normalizeExecutionIntent(intent);
@@ -734,7 +1092,7 @@ async function verifyPreSettlementExecutionIntent(input) {
       "Execution intent application does not match server configuration"
     );
   }
-  if (getAddress4(intent.gateway) !== getAddress4(expectedDomain.gateway)) {
+  if (getAddress5(intent.gateway) !== getAddress5(expectedDomain.gateway)) {
     return failure(
       "gateway_mismatch",
       "Execution intent gateway does not match server configuration"
@@ -770,7 +1128,7 @@ async function verifyPreSettlementExecutionIntent(input) {
     );
   }
   const now = input.now ?? Math.floor(Date.now() / 1e3);
-  if (input.enforceDeadline !== false && intent.deadline < now) {
+  if (input.enforceDeadline !== false && (!Number.isInteger(now) || intent.deadline < now)) {
     return failure(
       "execution_intent_expired",
       "Execution intent deadline has passed"
@@ -808,12 +1166,45 @@ async function verifyPreSettlementExecutionIntent(input) {
       "Execution intent signature is invalid"
     );
   }
+  const paymentVerification = await verifyExactHyperliquidPayment(
+    input.paymentPayload,
+    input.paymentRequirements,
+    { allowExpired: options.allowExpiredPayment }
+  );
+  if (!paymentVerification.isValid) {
+    if (paymentVerification.invalidReason === "invalid_exact_hl_payload" || paymentVerification.invalidReason === "invalid_exact_hl_payload_signature" || paymentVerification.invalidReason === "invalid_exact_hl_payload_signer_mismatch") {
+      return failure(
+        "malformed_extension_payload",
+        "Hyperliquid payment payload does not contain a valid payer signature"
+      );
+    }
+    return failure(
+      "payment_payload_requirements_mismatch",
+      "Signed Hyperliquid payment action does not satisfy the finalized requirements"
+    );
+  }
+  let paymentPayer;
+  try {
+    paymentPayer = getAddress5(paymentVerification.payer);
+  } catch {
+    return failure(
+      "malformed_extension_payload",
+      "Hyperliquid payment verification did not identify a valid payer"
+    );
+  }
+  if (input.requireSamePayer !== false && paymentPayer !== getAddress5(signature.signer)) {
+    return failure(
+      "execution_intent_payer_mismatch",
+      "Execution intent signer does not match the signed Hyperliquid payer"
+    );
+  }
   return {
     ok: true,
     intent,
     intentHash: expectedHash,
     intentTemplateHash,
     paymentRequirementsHash,
+    paymentPayer,
     signer: signature.signer
   };
 }
@@ -823,16 +1214,24 @@ async function verifyPaidExecutionIntent(input) {
   const settlement = input.settleResponse;
   let payer;
   try {
-    payer = getAddress4(settlement.payer);
+    payer = getAddress5(settlement.payer);
   } catch {
     return failure(
       "missing_settled_payer",
       "Successful settlement must identify a valid EVM payer"
     );
   }
-  const verified = await verifyPreSettlementExecutionIntent(input);
+  const verified = await verifyExecutionIntent(input, {
+    allowExpiredPayment: true
+  });
   if (!verified.ok) return verified;
-  if (input.requireSamePayer !== false && payer !== getAddress4(verified.signer)) {
+  if (payer !== verified.paymentPayer) {
+    return failure(
+      "execution_intent_payer_mismatch",
+      "Settled payer does not match the signed Hyperliquid payment payer"
+    );
+  }
+  if (input.requireSamePayer !== false && payer !== getAddress5(verified.signer)) {
     return failure(
       "execution_intent_payer_mismatch",
       "Execution intent signer does not match the settled Hyperliquid payer"
@@ -865,13 +1264,13 @@ function verifySettlement(input) {
       "Execution requires confirmed successful settlement"
     );
   }
-  if (!settlement.payer?.trim()) {
+  if (typeof settlement.payer !== "string" || !settlement.payer.trim()) {
     return failure(
       "missing_settled_payer",
       "Successful settlement must identify the payer"
     );
   }
-  if (!settlement.transaction?.trim()) {
+  if (typeof settlement.transaction !== "string" || !settlement.transaction.trim()) {
     return failure(
       "missing_settlement_transaction",
       "Successful settlement must include a transaction identifier"
@@ -895,6 +1294,11 @@ function failure(reason, message) {
   return { ok: false, reason, message };
 }
 
+// src/intents/server/identifiers.ts
+function canonicalizeTransactionIdentifier(value) {
+  return value.trim().replace(/[A-Z]/g, (character) => character.toLowerCase());
+}
+
 // src/intents/server/store.ts
 var IntentExecutionRecordSchema = IntentExecutionReceiptSchema.extend({
   intent: HyperEvmExecutionIntentSchema
@@ -907,7 +1311,14 @@ var InMemoryIntentExecutionStore = class {
   executions = /* @__PURE__ */ new Map();
   refunds = /* @__PURE__ */ new Map();
   async registerPaid(input) {
-    const record = IntentExecutionRecordSchema.parse(input);
+    const record = IntentExecutionRecordSchema.parse({
+      ...input,
+      paymentTransaction: canonicalizeTransactionIdentifier(
+        input.paymentTransaction
+      ),
+      executionTransaction: input.executionTransaction ? canonicalizeTransactionIdentifier(input.executionTransaction) : void 0,
+      refundTransaction: input.refundTransaction ? canonicalizeTransactionIdentifier(input.refundTransaction) : void 0
+    });
     const intentKey = normalizeHash(record.intentHash);
     const paymentKey = transactionIndex(
       record.paymentNetwork,
@@ -934,37 +1345,20 @@ var InMemoryIntentExecutionStore = class {
           record: cloneRecord(existing)
         };
       }
-      const duplicate = IntentExecutionRecordSchema.parse({
-        ...record,
-        revision: 0,
-        status: "refund_pending",
-        duplicatePayment: true,
-        executionNetwork: void 0,
-        executionTransaction: void 0,
-        refundNetwork: void 0,
-        refundTransaction: void 0,
-        executionAttempts: 0,
-        refundAttempts: 0,
-        claimToken: void 0,
-        failure: {
-          reason: "duplicate_payment",
-          message: "An additional settled payment for this intent must be refunded",
-          retryable: true
-        },
-        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-      });
-      this.duplicatePayments.set(paymentKey, cloneRecord(duplicate));
-      this.payments.set(paymentKey, { kind: "duplicate", paymentKey });
-      return { kind: "duplicate_payment", record: cloneRecord(duplicate) };
+      return this.insertDuplicatePayment(record, paymentKey);
     }
     const quoteKey = quoteIndex(record);
     const quoteOwner = this.quotes.get(quoteKey);
     if (quoteOwner) {
-      return {
-        kind: "conflict",
-        key: "quote_id",
-        record: cloneRecord(this.records.get(quoteOwner))
-      };
+      const quoteRecord = this.records.get(quoteOwner);
+      if (!quoteRecord || !sameQuotedExecution(quoteRecord, record)) {
+        return {
+          kind: "conflict",
+          key: "quote_id",
+          record: quoteRecord ? cloneRecord(quoteRecord) : void 0
+        };
+      }
+      return this.insertDuplicatePayment(record, paymentKey);
     }
     const stored = cloneRecord(record);
     this.records.set(intentKey, stored);
@@ -1018,9 +1412,12 @@ var InMemoryIntentExecutionStore = class {
         record: cloneRecord(current)
       };
     }
+    const patch = input.patch ?? {};
     const next = IntentExecutionRecordSchema.parse({
       ...current,
-      ...input.patch ?? {},
+      ...patch,
+      executionTransaction: patch.executionTransaction ? canonicalizeTransactionIdentifier(patch.executionTransaction) : current.executionTransaction,
+      refundTransaction: patch.refundTransaction ? canonicalizeTransactionIdentifier(patch.refundTransaction) : current.refundTransaction,
       status: input.to,
       revision: current.revision + 1,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
@@ -1071,6 +1468,30 @@ var InMemoryIntentExecutionStore = class {
       this.duplicatePayments.set(locator.paymentKey, cloneRecord(record));
     }
   }
+  insertDuplicatePayment(record, paymentKey) {
+    const duplicate = IntentExecutionRecordSchema.parse({
+      ...record,
+      revision: 0,
+      status: "refund_pending",
+      duplicatePayment: true,
+      executionNetwork: void 0,
+      executionTransaction: void 0,
+      refundNetwork: void 0,
+      refundTransaction: void 0,
+      executionAttempts: 0,
+      refundAttempts: 0,
+      claimToken: void 0,
+      failure: {
+        reason: "duplicate_payment",
+        message: "An additional settled payment for this quoted execution must be refunded",
+        retryable: true
+      },
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    this.duplicatePayments.set(paymentKey, cloneRecord(duplicate));
+    this.payments.set(paymentKey, { kind: "duplicate", paymentKey });
+    return { kind: "duplicate_payment", record: cloneRecord(duplicate) };
+  }
   transactionConflict(ownerKey, current, next) {
     if (next.executionNetwork && next.executionTransaction && (next.executionNetwork !== current.executionNetwork || next.executionTransaction !== current.executionTransaction)) {
       const owner = this.executions.get(
@@ -1115,10 +1536,13 @@ function isLegalTransition(from, to) {
   return LEGAL_TRANSITIONS[from].includes(to);
 }
 function sameIntentRegistration(left, right) {
-  return normalizeHash(left.intentHash) === normalizeHash(right.intentHash) && left.intentTemplateHash.toLowerCase() === right.intentTemplateHash.toLowerCase() && left.application === right.application && left.gateway.toLowerCase() === right.gateway.toLowerCase() && left.quoteId === right.quoteId && left.paymentRequirementsHash.toLowerCase() === right.paymentRequirementsHash.toLowerCase() && left.payer.toLowerCase() === right.payer.toLowerCase() && left.paymentScheme === right.paymentScheme && left.paymentNetwork === right.paymentNetwork && left.paymentAsset === right.paymentAsset && left.paymentAmount === right.paymentAmount && left.paymentPayTo.toLowerCase() === right.paymentPayTo.toLowerCase();
+  return normalizeHash(left.intentHash) === normalizeHash(right.intentHash) && left.intentTemplateHash.toLowerCase() === right.intentTemplateHash.toLowerCase() && left.application === right.application && left.gateway.toLowerCase() === right.gateway.toLowerCase() && left.quoteId === right.quoteId && left.paymentRequirementsHash.toLowerCase() === right.paymentRequirementsHash.toLowerCase() && left.paymentScheme === right.paymentScheme && left.paymentNetwork === right.paymentNetwork && left.paymentAsset === right.paymentAsset && left.paymentAmount === right.paymentAmount && left.paymentPayTo.toLowerCase() === right.paymentPayTo.toLowerCase();
+}
+function sameQuotedExecution(left, right) {
+  return left.intentTemplateHash.toLowerCase() === right.intentTemplateHash.toLowerCase() && left.application === right.application && left.gateway.toLowerCase() === right.gateway.toLowerCase() && left.quoteId === right.quoteId;
 }
 function samePaymentRegistration(left, right) {
-  return sameIntentRegistration(left, right) && left.paymentTransaction.toLowerCase() === right.paymentTransaction.toLowerCase();
+  return sameIntentRegistration(left, right) && left.payer.toLowerCase() === right.payer.toLowerCase() && canonicalizeTransactionIdentifier(left.paymentTransaction) === canonicalizeTransactionIdentifier(right.paymentTransaction);
 }
 function normalizeHash(value) {
   return value.toLowerCase();
@@ -1131,7 +1555,7 @@ function quoteIndex(record) {
   ].join("\0");
 }
 function transactionIndex(network, transaction) {
-  return `${network}\0${transaction.toLowerCase()}`;
+  return `${network}\0${canonicalizeTransactionIdentifier(transaction)}`;
 }
 function locatorKey(locator) {
   return locator.kind === "primary" ? `intent\0${locator.intentKey}` : `payment\0${locator.paymentKey}`;
@@ -1142,7 +1566,7 @@ function cloneRecord(record) {
 
 // src/intents/server/executor.ts
 import { randomUUID } from "crypto";
-import { getAddress as getAddress5, keccak256 as keccak2563 } from "viem";
+import { getAddress as getAddress6, keccak256 as keccak2563 } from "viem";
 var IntentStoreConflictError = class extends Error {
   record;
   constructor(message, record) {
@@ -1256,7 +1680,7 @@ function createIntentExecutor(config) {
           claimToken
         );
       }
-      if (!policy.allowed) {
+      if (!hasBooleanDiscriminator(policy, "allowed") || policy.allowed === false) {
         return failAndRefund(
           config,
           record,
@@ -1286,7 +1710,7 @@ function createIntentExecutor(config) {
         simulation = { success: false };
       }
       const simulationFailure = verifySimulation(record, simulation);
-      if (simulationFailure || !simulation.success) {
+      if (simulationFailure || !hasBooleanDiscriminator(simulation, "success") || simulation.success === false) {
         return failAndRefund(
           config,
           record,
@@ -1349,8 +1773,23 @@ function createIntentExecutor(config) {
           )
         );
       }
-      if (!execution.success) {
-        if (execution.mayHaveSucceeded || !execution.refundSafe) {
+      if (!hasBooleanDiscriminator(execution, "success")) {
+        return markManualIntervention(
+          config.store,
+          record,
+          executionClaimToken,
+          safeFailure(
+            "execution_uncertain",
+            "Execution adapter returned an invalid result after submission began",
+            false
+          )
+        );
+      }
+      if (execution.success === false) {
+        if (typeof execution.refundSafe !== "boolean" || Object.prototype.hasOwnProperty.call(
+          execution,
+          "mayHaveSucceeded"
+        ) && typeof execution.mayHaveSucceeded !== "boolean" || execution.mayHaveSucceeded === true || execution.refundSafe === false) {
           return markManualIntervention(
             config.store,
             record,
@@ -1375,7 +1814,7 @@ function createIntentExecutor(config) {
         );
       }
       const expectedExecutionNetwork = `eip155:${record.intent.chainId}`;
-      if (execution.confirmed !== true || typeof execution.transaction !== "string" || !execution.transaction.trim() || execution.network !== expectedExecutionNetwork) {
+      if (execution.confirmed !== true || typeof execution.transaction !== "string" || !execution.transaction.trim() || typeof execution.network !== "string" || !execution.network.trim()) {
         return markManualIntervention(
           config.store,
           record,
@@ -1387,6 +1826,27 @@ function createIntentExecutor(config) {
           )
         );
       }
+      const executionTransaction = canonicalizeTransactionIdentifier(
+        execution.transaction
+      );
+      const executionMetadata = parseAdapterMetadata(execution.metadata);
+      if (execution.network !== expectedExecutionNetwork) {
+        return markManualIntervention(
+          config.store,
+          record,
+          executionClaimToken,
+          safeFailure(
+            "execution_uncertain",
+            "Executor returned a confirmed receipt on the wrong destination network",
+            false
+          ),
+          {
+            executionNetwork: execution.network,
+            executionTransaction,
+            metadata: executionMetadata
+          }
+        );
+      }
       const executed = await config.store.transition({
         intentHash: record.intentHash,
         expectedRevision: record.revision,
@@ -1396,9 +1856,9 @@ function createIntentExecutor(config) {
         patch: {
           claimToken: void 0,
           executionNetwork: execution.network,
-          executionTransaction: execution.transaction,
+          executionTransaction,
           failure: void 0,
-          metadata: execution.metadata
+          metadata: executionMetadata
         }
       });
       if (executed.kind === "updated") return executed.record;
@@ -1409,7 +1869,8 @@ function createIntentExecutor(config) {
         executed,
         {
           executionNetwork: execution.network,
-          executionTransaction: execution.transaction
+          executionTransaction,
+          metadata: executionMetadata
         }
       );
     },
@@ -1599,7 +2060,9 @@ function createPaidRecord(verified, input) {
     paymentAsset: input.paymentRequirements.asset,
     paymentAmount: input.paymentRequirements.amount,
     paymentPayTo: input.paymentRequirements.payTo,
-    paymentTransaction: verified.settlement.transaction,
+    paymentTransaction: canonicalizeTransactionIdentifier(
+      verified.settlement.transaction
+    ),
     executionAttempts: 0,
     refundAttempts: 0,
     createdAt: now,
@@ -1614,10 +2077,13 @@ function executionContext(record) {
     idempotencyKey: record.intentHash
   };
 }
+function hasBooleanDiscriminator(value, key) {
+  return value != null && typeof value === "object" && typeof value[key] === "boolean";
+}
 function verifyPolicyBinding(record, policy) {
   const expectedSelector = record.intent.callData.length >= 10 ? record.intent.callData.slice(0, 10).toLowerCase() : "0x";
   try {
-    const matches = policy.chainId === record.intent.chainId && getAddress5(policy.target) === getAddress5(record.intent.target) && policy.callDataHash.toLowerCase() === keccak2563(record.intent.callData).toLowerCase() && policy.selector.toLowerCase() === expectedSelector && policy.value === record.intent.value && getAddress5(policy.recipient) === getAddress5(record.intent.recipient);
+    const matches = policy.chainId === record.intent.chainId && getAddress6(policy.target) === getAddress6(record.intent.target) && policy.callDataHash.toLowerCase() === keccak2563(record.intent.callData).toLowerCase() && policy.selector.toLowerCase() === expectedSelector && policy.value === record.intent.value && getAddress6(policy.recipient) === getAddress6(record.intent.recipient);
     if (matches) return void 0;
   } catch {
   }
@@ -1628,7 +2094,7 @@ function verifyPolicyBinding(record, policy) {
   );
 }
 function verifySimulation(record, simulation) {
-  if (!simulation.success) {
+  if (!hasBooleanDiscriminator(simulation, "success") || simulation.success === false) {
     return safeFailure(
       "simulation_failed",
       "Destination execution simulation failed",
@@ -1636,7 +2102,7 @@ function verifySimulation(record, simulation) {
     );
   }
   try {
-    const matches = simulation.chainId === record.intent.chainId && getAddress5(simulation.target) === getAddress5(record.intent.target) && simulation.callDataHash.toLowerCase() === keccak2563(record.intent.callData).toLowerCase() && simulation.value === record.intent.value && getAddress5(simulation.recipient) === getAddress5(record.intent.recipient);
+    const matches = simulation.chainId === record.intent.chainId && getAddress6(simulation.target) === getAddress6(record.intent.target) && simulation.callDataHash.toLowerCase() === keccak2563(record.intent.callData).toLowerCase() && simulation.value === record.intent.value && getAddress6(simulation.recipient) === getAddress6(record.intent.recipient);
     if (!matches) {
       return safeFailure(
         "policy_binding_mismatch",
@@ -1753,7 +2219,19 @@ async function runRefund(config, input, createClaimToken) {
       )
     );
   }
-  if (refund.success) {
+  if (!hasBooleanDiscriminator(refund, "success")) {
+    return markManualIntervention(
+      config.store,
+      record,
+      refundClaimToken,
+      safeFailure(
+        "refund_uncertain",
+        "Refund adapter returned an invalid result after submission began",
+        false
+      )
+    );
+  }
+  if (refund.success === true) {
     if (refund.confirmed !== true || typeof refund.transaction !== "string" || !refund.transaction.trim() || typeof refund.network !== "string" || !refund.network.trim()) {
       return markManualIntervention(
         config.store,
@@ -1766,6 +2244,10 @@ async function runRefund(config, input, createClaimToken) {
         )
       );
     }
+    const refundTransaction = canonicalizeTransactionIdentifier(
+      refund.transaction
+    );
+    const refundMetadata = parseAdapterMetadata(refund.metadata);
     if (refund.network !== record.paymentNetwork) {
       return markManualIntervention(
         config.store,
@@ -1778,7 +2260,8 @@ async function runRefund(config, input, createClaimToken) {
         ),
         {
           refundNetwork: refund.network,
-          refundTransaction: refund.transaction
+          refundTransaction,
+          metadata: refundMetadata
         }
       );
     }
@@ -1792,9 +2275,9 @@ async function runRefund(config, input, createClaimToken) {
         patch: {
           claimToken: void 0,
           refundNetwork: refund.network,
-          refundTransaction: refund.transaction,
+          refundTransaction,
           failure: void 0,
-          metadata: refund.metadata
+          metadata: refundMetadata
         }
       })
     );
@@ -1806,11 +2289,12 @@ async function runRefund(config, input, createClaimToken) {
       refunded,
       {
         refundNetwork: refund.network,
-        refundTransaction: refund.transaction
+        refundTransaction,
+        metadata: refundMetadata
       }
     );
   }
-  if (refund.mayHaveSucceeded) {
+  if (typeof refund.retryable !== "boolean" || Object.prototype.hasOwnProperty.call(refund, "mayHaveSucceeded") && typeof refund.mayHaveSucceeded !== "boolean" || refund.mayHaveSucceeded === true) {
     return markManualIntervention(
       config.store,
       record,
@@ -1898,7 +2382,16 @@ function paymentTransition(record, transition) {
   } : transition;
 }
 function refundIdempotencyKey(record) {
-  return record.duplicatePayment ? `${record.intentHash}:refund:${record.paymentNetwork}:${record.paymentTransaction.toLowerCase()}` : `${record.intentHash}:refund`;
+  return record.duplicatePayment ? `${record.intentHash}:refund:${record.paymentNetwork}:${canonicalizeTransactionIdentifier(record.paymentTransaction)}` : `${record.intentHash}:refund`;
+}
+function parseAdapterMetadata(metadata) {
+  if (metadata === void 0) return void 0;
+  try {
+    const parsed = JsonRecordSchema.safeParse(metadata);
+    return parsed.success ? parsed.data : void 0;
+  } catch {
+    return void 0;
+  }
 }
 function safeFailure(reason, message, retryable) {
   return { reason, message, retryable };
@@ -1926,6 +2419,7 @@ export {
   IntentStoreConflictError,
   JsonRecordSchema,
   JsonValueSchema,
+  MAX_JSON_NESTING_DEPTH,
   NonZeroEvmAddressSchema,
   PositiveSafeIntegerSchema,
   SignedHyperEvmExecutionIntentSchema,
@@ -1956,6 +2450,7 @@ export {
   hashPaymentRequirements,
   isLegalIntentExecutionTransition,
   isTerminalIntentExecutionStatus,
+  isWellFormedUnicode,
   normalizeBytes32,
   normalizeExecutionIntent,
   readIntentDeclaration,

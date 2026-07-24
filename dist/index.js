@@ -33,7 +33,7 @@ function isHyperliquidNetwork(network) {
 
 // src/types.ts
 import { z } from "zod";
-var HyperliquidTokenIdRegex = /^[A-Za-z0-9]+:0x[0-9a-fA-F]{32,40}$/;
+var HyperliquidTokenIdRegex = /^[^:]+:0x[0-9a-fA-F]{32,40}$/;
 var Bytes32Regex = /^0x[0-9a-fA-F]{64}$/;
 var EvmAddressRegex = /^0x[0-9a-fA-F]{40}$/;
 var HexIntegerRegex = /^0x[0-9a-fA-F]+$/;
@@ -72,6 +72,7 @@ var HyperliquidErrorReasons = [
   "invalid_exact_hl_payload_recipient_mismatch",
   "invalid_exact_hl_payload_amount_mismatch",
   "invalid_exact_hl_network",
+  "payment_expired",
   "hl_exchange_error",
   "hl_tx_not_found",
   "hl_tx_unconfirmed",
@@ -102,23 +103,26 @@ function createInfoClient(network, options) {
   });
   return new hl.InfoClient({ transport });
 }
-async function fetchTransactionDetails(network, hash) {
+async function fetchTransactionDetails(network, hash, signal) {
   assertHyperliquidNetwork(network);
   const transport = new hl.HttpTransport({
     isTestnet: network === HYPERLIQUID_TESTNET
   });
   const client = new hl.ExplorerClient({ transport });
-  const response = await client.txDetails({ hash });
+  const response = await client.txDetails({ hash }, signal);
   return response.tx;
 }
 var tokenInfoCache = /* @__PURE__ */ new Map();
-async function fetchHyperliquidTokenInfo(network, tokenId) {
+async function fetchHyperliquidTokenInfo(network, tokenId, signal) {
   assertHyperliquidNetwork(network);
   const cacheKey = `${network}:${tokenId.toLowerCase()}`;
   const cached = tokenInfoCache.get(cacheKey);
   if (cached) return cached;
   const client = createInfoClient(network);
-  const response = await client.tokenDetails({ tokenId });
+  const response = await client.tokenDetails(
+    { tokenId },
+    signal
+  );
   const info = {
     decimals: response.weiDecimals,
     symbol: response.name,
@@ -219,14 +223,176 @@ var ExactHyperliquidScheme = class {
   }
 };
 
-// src/exact/facilitator/scheme.ts
+// src/exact/facilitator/verification.ts
 import { SendAssetTypes as SendAssetTypes2 } from "@nktkas/hyperliquid/api/exchange";
 import { getAddress, recoverTypedDataAddress } from "viem";
+var MAX_CLOCK_SKEW_MS = 30 * 1e3;
+async function verifyExactHyperliquidPayment(payload, requirements, options) {
+  if (payload.x402Version !== 2) {
+    return { isValid: false, invalidReason: "invalid_x402_version" };
+  }
+  if (payload.accepted?.scheme !== "exact" || requirements.scheme !== "exact") {
+    return { isValid: false, invalidReason: "unsupported_scheme" };
+  }
+  if (payload.accepted?.network !== requirements.network) {
+    return { isValid: false, invalidReason: "network_mismatch" };
+  }
+  if (!paymentRequirementsMatch(payload.accepted, requirements)) {
+    return { isValid: false, invalidReason: "invalid_exact_hl_payload" };
+  }
+  if (!SupportedHyperliquidNetworks.includes(requirements.network)) {
+    return { isValid: false, invalidReason: "invalid_exact_hl_network" };
+  }
+  const parsed = ExactHyperliquidPayloadSchema.safeParse(payload.payload);
+  if (!parsed.success) {
+    return { isValid: false, invalidReason: "invalid_exact_hl_payload" };
+  }
+  const exactPayload = parsed.data;
+  const action = exactPayload.action;
+  if (action.hyperliquidChain !== getHyperliquidChainName(requirements.network)) {
+    return {
+      isValid: false,
+      invalidReason: "invalid_exact_hl_payload_chain_mismatch"
+    };
+  }
+  if (action.nonce !== exactPayload.nonce) {
+    return {
+      isValid: false,
+      invalidReason: "invalid_exact_hl_payload_nonce_mismatch"
+    };
+  }
+  if (action.destination.toLowerCase() !== requirements.payTo.toLowerCase()) {
+    return {
+      isValid: false,
+      invalidReason: "invalid_exact_hl_payload_recipient_mismatch"
+    };
+  }
+  if (!tokenMatchesRequirements(action.token, requirements.asset)) {
+    return {
+      isValid: false,
+      invalidReason: "invalid_exact_hl_payload_asset_mismatch"
+    };
+  }
+  if (!(options.validateTtl ?? validateTtl)(
+    action.nonce,
+    requirements.maxTimeoutSeconds,
+    options.allowExpired
+  )) {
+    return { isValid: false, invalidReason: "payment_expired" };
+  }
+  const decimals = await resolveDecimals(requirements);
+  if (!validateAmount(action.amount, requirements.amount, decimals)) {
+    return {
+      isValid: false,
+      invalidReason: "invalid_exact_hl_payload_amount_mismatch"
+    };
+  }
+  try {
+    const recoveredPayer = getAddress(
+      await recoverTypedDataAddress({
+        domain: {
+          name: "HyperliquidSignTransaction",
+          version: "1",
+          chainId: BigInt(action.signatureChainId),
+          verifyingContract: "0x0000000000000000000000000000000000000000"
+        },
+        types: SendAssetTypes2,
+        primaryType: "HyperliquidTransaction:SendAsset",
+        message: action,
+        signature: {
+          r: exactPayload.signature.r,
+          s: exactPayload.signature.s,
+          yParity: exactPayload.signature.v - 27
+        }
+      })
+    );
+    if (recoveredPayer !== getAddress(exactPayload.user)) {
+      return {
+        isValid: false,
+        invalidReason: "invalid_exact_hl_payload_signer_mismatch"
+      };
+    }
+    return { isValid: true, payer: recoveredPayer };
+  } catch {
+    return {
+      isValid: false,
+      invalidReason: "invalid_exact_hl_payload_signature"
+    };
+  }
+}
+async function resolveDecimals(requirements, signal) {
+  if (typeof requirements.extra?.decimals === "number") {
+    return requirements.extra.decimals;
+  }
+  const tokenId = extractTokenId(requirements.asset);
+  if (!tokenId) return void 0;
+  try {
+    const info = await fetchHyperliquidTokenInfo(
+      requirements.network,
+      tokenId,
+      signal
+    );
+    return info.decimals;
+  } catch {
+    return void 0;
+  }
+}
+function tokenMatchesRequirements(payloadToken, requiredAsset) {
+  if (payloadToken === requiredAsset) return true;
+  const payloadTokenId = extractTokenId(payloadToken)?.toLowerCase();
+  const requiredTokenId = extractTokenId(requiredAsset)?.toLowerCase();
+  return Boolean(
+    payloadTokenId && requiredTokenId && payloadTokenId === requiredTokenId
+  );
+}
+function validateAmount(payloadAmount, requiredAmount, decimals) {
+  if (decimals == null || decimals < 0) {
+    return normalizeDecimal(payloadAmount) === normalizeDecimal(requiredAmount);
+  }
+  try {
+    return decimalToAtomic(payloadAmount, decimals) === BigInt(requiredAmount);
+  } catch {
+    return false;
+  }
+}
+function decimalToAtomic(value, decimals) {
+  const match = /^(\d+)(?:\.(\d+))?$/.exec(value.trim());
+  if (!match) throw new Error("invalid decimal amount");
+  const [, whole, fraction = ""] = match;
+  if (/[1-9]/.test(fraction.slice(decimals))) {
+    throw new Error("decimal amount exceeds token precision");
+  }
+  const normalizedFraction = fraction.slice(0, decimals).padEnd(decimals, "0");
+  return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(normalizedFraction || "0");
+}
+function validateTtl(actionTime, maxTimeoutSeconds, allowExpired = false) {
+  if (typeof actionTime !== "number") return false;
+  const now = Date.now();
+  return actionTime <= now + MAX_CLOCK_SKEW_MS && (allowExpired || now <= actionTime + maxTimeoutSeconds * 1e3);
+}
+function extractTokenId(asset) {
+  if (!asset) return void 0;
+  const parts = asset.split(":");
+  return parts.length === 2 ? parts[1] : parts[0]?.startsWith("0x") ? parts[0] : void 0;
+}
+function paymentRequirementsMatch(accepted, required) {
+  if (typeof accepted.payTo !== "string" || typeof required.payTo !== "string") {
+    return false;
+  }
+  return accepted.scheme === required.scheme && accepted.network === required.network && accepted.asset === required.asset && accepted.amount === required.amount && accepted.payTo.toLowerCase() === required.payTo.toLowerCase() && accepted.maxTimeoutSeconds === required.maxTimeoutSeconds;
+}
+function normalizeDecimal(value) {
+  return value.trim().replace(/^0+(?=\d)/, "").replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+}
+
+// src/exact/facilitator/scheme.ts
 var SETTLEMENT_CACHE_TTL_MS = 5 * 60 * 1e3;
 var MATCH_LOOKAHEAD_MS = 30 * 1e3;
-var MATCH_ATTEMPTS = 5;
-var MATCH_RETRY_DELAY_MS = 500;
-var MAX_CLOCK_SKEW_MS = 30 * 1e3;
+var PRE_SUBMIT_RECONCILIATION_ATTEMPTS = 5;
+var MATCH_RETRY_DELAY_MS = 1e3;
+var PRE_SUBMIT_RECONCILIATION_TIMEOUT_MS = 30 * 1e3;
+var EXCHANGE_SUBMISSION_TIMEOUT_MS = 30 * 1e3;
+var POST_SUBMIT_CONFIRMATION_TIMEOUT_MS = 30 * 1e3;
 var MATCH_LOOKBACK_MS = MAX_CLOCK_SKEW_MS;
 var MATCH_WINDOW_LATE_GRACE_MS = MAX_CLOCK_SKEW_MS + MATCH_LOOKAHEAD_MS;
 var ExactHyperliquidScheme2 = class {
@@ -241,93 +407,17 @@ var ExactHyperliquidScheme2 = class {
     return [];
   }
   async verify(payload, requirements) {
-    return this.verifyPayment(payload, requirements, { enforceTtl: true });
+    return this.verifyPayment(payload, requirements, { allowExpired: false });
   }
   async verifyPayment(payload, requirements, options) {
-    if (payload.x402Version !== 2) {
-      return { isValid: false, invalidReason: "invalid_x402_version" };
-    }
-    if (payload.accepted?.scheme !== "exact" || requirements.scheme !== "exact") {
-      return { isValid: false, invalidReason: "unsupported_scheme" };
-    }
-    if (payload.accepted?.network !== requirements.network) {
-      return { isValid: false, invalidReason: "network_mismatch" };
-    }
-    if (!this.paymentRequirementsMatch(payload.accepted, requirements)) {
-      return { isValid: false, invalidReason: "invalid_exact_hl_payload" };
-    }
-    if (!SupportedHyperliquidNetworks.includes(requirements.network)) {
-      return { isValid: false, invalidReason: "invalid_exact_hl_network" };
-    }
-    const parsed = ExactHyperliquidPayloadSchema.safeParse(payload.payload);
-    if (!parsed.success) {
-      return { isValid: false, invalidReason: "invalid_exact_hl_payload" };
-    }
-    const exactPayload = parsed.data;
-    const action = exactPayload.action;
-    const destination = action.destination;
-    const token = action.token;
-    const amount = action.amount;
-    if (action.hyperliquidChain !== getHyperliquidChainName(requirements.network)) {
-      return {
-        isValid: false,
-        invalidReason: "invalid_exact_hl_payload_chain_mismatch"
-      };
-    }
-    if (action.nonce !== exactPayload.nonce) {
-      return {
-        isValid: false,
-        invalidReason: "invalid_exact_hl_payload_nonce_mismatch"
-      };
-    }
-    if (destination.toLowerCase() !== requirements.payTo.toLowerCase()) {
-      return { isValid: false, invalidReason: "invalid_exact_hl_payload_recipient_mismatch" };
-    }
-    if (!this.tokenMatchesRequirements(token, requirements.asset)) {
-      return { isValid: false, invalidReason: "invalid_exact_hl_payload_asset_mismatch" };
-    }
-    const decimals = await this.resolveDecimals(requirements);
-    if (!this.validateAmount(amount, requirements.amount, decimals)) {
-      return { isValid: false, invalidReason: "invalid_exact_hl_payload_amount_mismatch" };
-    }
-    if (options.enforceTtl && !this.validateTtl(action.nonce, requirements.maxTimeoutSeconds)) {
-      return { isValid: false, invalidReason: "payment_expired" };
-    }
-    let recoveredPayer;
-    try {
-      recoveredPayer = await recoverTypedDataAddress({
-        domain: {
-          name: "HyperliquidSignTransaction",
-          version: "1",
-          chainId: Number.parseInt(action.signatureChainId),
-          verifyingContract: "0x0000000000000000000000000000000000000000"
-        },
-        types: SendAssetTypes2,
-        primaryType: "HyperliquidTransaction:SendAsset",
-        message: action,
-        signature: {
-          r: exactPayload.signature.r,
-          s: exactPayload.signature.s,
-          yParity: exactPayload.signature.v - 27
-        }
-      });
-    } catch {
-      return {
-        isValid: false,
-        invalidReason: "invalid_exact_hl_payload_signature"
-      };
-    }
-    if (getAddress(recoveredPayer) !== getAddress(exactPayload.user)) {
-      return {
-        isValid: false,
-        invalidReason: "invalid_exact_hl_payload_signer_mismatch"
-      };
-    }
-    return { isValid: true, payer: getAddress(recoveredPayer) };
+    return verifyExactHyperliquidPayment(payload, requirements, {
+      ...options,
+      validateTtl: (actionTime, maxTimeoutSeconds, allowExpired) => this.validateTtl(actionTime, maxTimeoutSeconds, allowExpired)
+    });
   }
   async settle(payload, requirements) {
     const verification = await this.verifyPayment(payload, requirements, {
-      enforceTtl: false
+      allowExpired: true
     });
     if (!verification.isValid) {
       return {
@@ -363,11 +453,16 @@ var ExactHyperliquidScheme2 = class {
     if (cached) return cached;
     const pending = this.pendingSettlements.get(idempotencyKey);
     if (pending) return pending;
-    const ttlValid = this.validateTtl(
+    const expiredAtStart = !this.validateTtl(
       exactPayload.action.nonce,
       requirements.maxTimeoutSeconds
     );
-    const settlement = this.settleVerified(exactPayload, requirements, payer, ttlValid).then((response) => {
+    const settlement = this.settleVerified(
+      exactPayload,
+      requirements,
+      payer,
+      expiredAtStart
+    ).then((response) => {
       if (response.success) {
         this.cacheSettlement(idempotencyKey, response);
       }
@@ -378,16 +473,18 @@ var ExactHyperliquidScheme2 = class {
     this.pendingSettlements.set(idempotencyKey, settlement);
     return settlement;
   }
-  async settleVerified(exactPayload, requirements, payer, ttlValid) {
+  async settleVerified(exactPayload, requirements, payer, expiredAtStart) {
     const endpoint = getExchangeBaseUrl(requirements.network);
     const infoClient = createInfoClient(requirements.network);
     try {
+      const reconciliationDeadline = Date.now() + PRE_SUBMIT_RECONCILIATION_TIMEOUT_MS;
       const existingHash = await this.findConfirmedTransaction(
         infoClient,
         payer,
         exactPayload,
         requirements,
-        ttlValid ? 1 : MATCH_ATTEMPTS
+        expiredAtStart ? PRE_SUBMIT_RECONCILIATION_ATTEMPTS : 1,
+        reconciliationDeadline
       );
       if (existingHash) {
         return {
@@ -398,7 +495,10 @@ var ExactHyperliquidScheme2 = class {
           amount: requirements.amount
         };
       }
-      if (!ttlValid) {
+      if (!this.validateTtl(
+        exactPayload.action.nonce,
+        requirements.maxTimeoutSeconds
+      )) {
         return {
           success: false,
           errorReason: "payment_expired",
@@ -407,17 +507,24 @@ var ExactHyperliquidScheme2 = class {
           payer
         };
       }
+      const submissionDeadline = Date.now() + EXCHANGE_SUBMISSION_TIMEOUT_MS;
       let submissionFailed = false;
       try {
-        await this.submitToExchange(endpoint, exactPayload);
+        await this.runBeforeDeadline(
+          submissionDeadline,
+          (signal) => this.submitToExchange(endpoint, exactPayload, signal)
+        );
       } catch {
         submissionFailed = true;
       }
+      const confirmationDeadline = Date.now() + POST_SUBMIT_CONFIRMATION_TIMEOUT_MS;
       const matchedHash = await this.findConfirmedTransaction(
         infoClient,
         payer,
         exactPayload,
-        requirements
+        requirements,
+        void 0,
+        confirmationDeadline
       );
       if (matchedHash) {
         return {
@@ -445,10 +552,11 @@ var ExactHyperliquidScheme2 = class {
       };
     }
   }
-  async submitToExchange(endpoint, payload) {
+  async submitToExchange(endpoint, payload, signal) {
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal,
       body: JSON.stringify({
         action: payload.action,
         signature: payload.signature,
@@ -481,41 +589,86 @@ var ExactHyperliquidScheme2 = class {
       return String(body).slice(0, 500);
     }
   }
-  async confirmTransaction(hash, payer, payload, requirements) {
+  async runBeforeDeadline(deadline, operation) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("confirmation deadline exceeded");
+    const controller = new AbortController();
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error("confirmation deadline exceeded"));
+      }, remaining);
+    });
+    try {
+      return await Promise.race([operation(controller.signal), timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  async confirmTransaction(hash, payer, payload, requirements, deadline) {
     for (let i = 0; i < 3; i++) {
+      if (deadline != null && Date.now() >= deadline) return false;
       try {
-        const tx = await fetchTransactionDetails(
-          requirements.network,
-          hash
+        const tx = deadline == null ? await fetchTransactionDetails(requirements.network, hash) : await this.runBeforeDeadline(
+          deadline,
+          (signal) => fetchTransactionDetails(
+            requirements.network,
+            hash,
+            signal
+          )
         );
+        if (deadline != null && Date.now() >= deadline) return false;
         if (tx.error != null || tx.user.toLowerCase() !== payer.toLowerCase()) {
           return false;
         }
         const action = tx.action;
         const expected = payload.action;
-        const decimals = await this.resolveDecimals(requirements);
-        return action.type === "sendAsset" && action.signatureChainId === expected.signatureChainId && action.hyperliquidChain === expected.hyperliquidChain && typeof action.destination === "string" && action.destination.toLowerCase() === expected.destination.toLowerCase() && typeof action.token === "string" && this.tokenMatchesRequirements(action.token, expected.token) && typeof action.amount === "string" && this.decimalAmountsEqual(action.amount, expected.amount, decimals) && action.nonce === expected.nonce;
+        const decimals = deadline == null ? await resolveDecimals(requirements) : await this.runBeforeDeadline(
+          deadline,
+          (signal) => resolveDecimals(requirements, signal)
+        );
+        if (deadline != null && Date.now() >= deadline) return false;
+        return action.type === "sendAsset" && action.signatureChainId === expected.signatureChainId && action.hyperliquidChain === expected.hyperliquidChain && typeof action.destination === "string" && action.destination.toLowerCase() === expected.destination.toLowerCase() && typeof action.token === "string" && tokenMatchesRequirements(action.token, expected.token) && typeof action.amount === "string" && this.decimalAmountsEqual(action.amount, expected.amount, decimals) && action.nonce === expected.nonce;
       } catch {
       }
-      await new Promise((r) => setTimeout(r, 250));
+      const remaining = deadline == null ? 250 : deadline - Date.now();
+      if (remaining <= 0) return false;
+      await new Promise((r) => setTimeout(r, Math.min(250, remaining)));
     }
     return false;
   }
-  async findConfirmedTransaction(client, payer, payload, requirements, attempts = MATCH_ATTEMPTS) {
+  async findConfirmedTransaction(client, payer, payload, requirements, attempts, operationDeadline) {
     const action = payload.action;
     const destination = typeof action.destination === "string" ? action.destination : void 0;
     const token = typeof action.token === "string" ? action.token : void 0;
     const amount = typeof action.amount === "string" ? action.amount : void 0;
     if (!destination || !token || !amount) return void 0;
-    const decimals = await this.resolveDecimals(requirements);
+    const deadline = operationDeadline ?? (attempts === void 0 ? Date.now() + POST_SUBMIT_CONFIRMATION_TIMEOUT_MS : void 0);
+    let decimals;
+    try {
+      decimals = deadline == null ? await resolveDecimals(requirements) : await this.runBeforeDeadline(
+        deadline,
+        (signal) => resolveDecimals(requirements, signal)
+      );
+    } catch {
+      return void 0;
+    }
     const startTime = Math.max(0, payload.nonce - MATCH_LOOKBACK_MS);
-    for (let attempt = 0; attempt < attempts; attempt++) {
+    let attempt = 0;
+    while ((attempts === void 0 || attempt < attempts) && (deadline == null || Date.now() < deadline)) {
+      attempt += 1;
       try {
-        const updates = await client.userNonFundingLedgerUpdates({
+        const updateParameters = {
           user: payer,
           startTime,
           endTime: Date.now() + MATCH_LOOKAHEAD_MS
-        });
+        };
+        const updates = deadline == null ? await client.userNonFundingLedgerUpdates(updateParameters) : await this.runBeforeDeadline(
+          deadline,
+          (signal) => client.userNonFundingLedgerUpdates(updateParameters, signal)
+        );
+        if (deadline != null && Date.now() >= deadline) break;
         const candidates = updates.filter(
           (update) => this.ledgerUpdateMatchesPayment(update, {
             payer,
@@ -532,16 +685,20 @@ var ExactHyperliquidScheme2 = class {
             candidate.hash,
             payer,
             payload,
-            requirements
+            requirements,
+            deadline
           )) {
             return candidate.hash;
           }
         }
       } catch {
       }
-      if (attempt < attempts - 1) {
-        await new Promise((r) => setTimeout(r, MATCH_RETRY_DELAY_MS));
-      }
+      if (attempts !== void 0 && attempt >= attempts) break;
+      const remaining = deadline == null ? MATCH_RETRY_DELAY_MS : deadline - Date.now();
+      if (remaining <= 0) break;
+      await new Promise(
+        (r) => setTimeout(r, Math.min(MATCH_RETRY_DELAY_MS, remaining))
+      );
     }
     return void 0;
   }
@@ -550,10 +707,12 @@ var ExactHyperliquidScheme2 = class {
     const destination = typeof action.destination === "string" ? action.destination.toLowerCase() : "";
     const token = typeof action.token === "string" ? action.token.toLowerCase() : "";
     const amount = typeof action.amount === "string" ? action.amount : "";
+    const signatureChainId = typeof action.signatureChainId === "string" ? BigInt(action.signatureChainId).toString() : "";
     return [
       network,
       payload.user.toLowerCase(),
       String(payload.nonce),
+      signatureChainId,
       destination,
       token,
       amount
@@ -590,8 +749,8 @@ var ExactHyperliquidScheme2 = class {
     return this.decimalAmountsEqual(delta.amount, expected.amount, expected.decimals);
   }
   ledgerTokenMatches(ledgerToken, payloadToken, requiredAsset) {
-    if (this.tokenMatchesRequirements(ledgerToken, payloadToken)) return true;
-    if (this.tokenMatchesRequirements(ledgerToken, requiredAsset)) return true;
+    if (tokenMatchesRequirements(ledgerToken, payloadToken)) return true;
+    if (tokenMatchesRequirements(ledgerToken, requiredAsset)) return true;
     const ledgerSymbol = this.extractTokenSymbol(ledgerToken);
     return Boolean(
       ledgerSymbol && (ledgerSymbol === this.extractTokenSymbol(payloadToken) || ledgerSymbol === this.extractTokenSymbol(requiredAsset))
@@ -604,7 +763,7 @@ var ExactHyperliquidScheme2 = class {
   decimalAmountsEqual(left, right, decimals) {
     if (decimals != null && decimals >= 0) {
       try {
-        return this.decimalToAtomic(left, decimals) === this.decimalToAtomic(right, decimals);
+        return decimalToAtomic(left, decimals) === decimalToAtomic(right, decimals);
       } catch {
         return false;
       }
@@ -614,51 +773,8 @@ var ExactHyperliquidScheme2 = class {
   normalizeDecimal(value) {
     return value.trim().replace(/^0+(?=\d)/, "").replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
   }
-  async resolveDecimals(req) {
-    if (typeof req.extra?.decimals === "number") return req.extra.decimals;
-    const tokenId = this.extractTokenId(req.asset);
-    if (!tokenId) return void 0;
-    try {
-      const info = await fetchHyperliquidTokenInfo(req.network, tokenId);
-      return info.decimals;
-    } catch {
-      return void 0;
-    }
-  }
-  extractTokenId(asset) {
-    if (!asset) return void 0;
-    const parts = asset.split(":");
-    return parts.length === 2 ? parts[1] : parts[0]?.startsWith("0x") ? parts[0] : void 0;
-  }
-  tokenMatchesRequirements(payloadToken, requiredAsset) {
-    if (payloadToken === requiredAsset) return true;
-    const payloadTokenId = this.extractTokenId(payloadToken)?.toLowerCase();
-    const requiredTokenId = this.extractTokenId(requiredAsset)?.toLowerCase();
-    return Boolean(payloadTokenId && requiredTokenId && payloadTokenId === requiredTokenId);
-  }
-  paymentRequirementsMatch(accepted, required) {
-    return accepted.scheme === required.scheme && accepted.network === required.network && accepted.asset === required.asset && accepted.amount === required.amount && accepted.payTo.toLowerCase() === required.payTo.toLowerCase() && accepted.maxTimeoutSeconds === required.maxTimeoutSeconds;
-  }
-  validateAmount(payloadAmount, requiredAmount, decimals) {
-    if (decimals == null || decimals < 0) {
-      return this.normalizeDecimal(payloadAmount) === this.normalizeDecimal(requiredAmount);
-    }
-    try {
-      const payloadAtomic = this.decimalToAtomic(payloadAmount, decimals);
-      return payloadAtomic === BigInt(requiredAmount);
-    } catch {
-      return false;
-    }
-  }
-  decimalToAtomic(value, decimals) {
-    const [whole, fraction = ""] = value.trim().split(".");
-    const normalizedFraction = fraction.padEnd(decimals, "0").slice(0, decimals);
-    return BigInt(whole || "0") * 10n ** BigInt(decimals) + BigInt(normalizedFraction || "0");
-  }
-  validateTtl(actionTime, maxTimeoutSeconds) {
-    if (typeof actionTime !== "number") return false;
-    const now = Date.now();
-    return actionTime <= now + MAX_CLOCK_SKEW_MS && now <= actionTime + maxTimeoutSeconds * 1e3;
+  validateTtl(actionTime, maxTimeoutSeconds, allowExpired = false) {
+    return validateTtl(actionTime, maxTimeoutSeconds, allowExpired);
   }
   paymentNonce(payload) {
     return payload.action.nonce;

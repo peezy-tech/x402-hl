@@ -6,6 +6,7 @@ import {
   ExecutionIntentDomain,
   IntentFailure,
   IntentFailureReason,
+  JsonRecordSchema,
   JsonValue,
   X402_HL_INTENT_VERSION,
   isTerminalIntentExecutionStatus,
@@ -21,6 +22,7 @@ import {
   verifyPaidExecutionIntent,
   verifyPreSettlementExecutionIntent,
 } from "./verification";
+import { canonicalizeTransactionIdentifier } from "./identifiers";
 import type {
   IntentExecutionRecord,
   IntentExecutionStore,
@@ -264,7 +266,7 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
           claimToken,
         );
       }
-      if (!policy.allowed) {
+      if (!hasBooleanDiscriminator(policy, "allowed") || policy.allowed === false) {
         return failAndRefund(
           config,
           record,
@@ -296,7 +298,11 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
         simulation = { success: false };
       }
       const simulationFailure = verifySimulation(record, simulation);
-      if (simulationFailure || !simulation.success) {
+      if (
+        simulationFailure ||
+        !hasBooleanDiscriminator(simulation, "success") ||
+        simulation.success === false
+      ) {
         return failAndRefund(
           config,
           record,
@@ -365,8 +371,29 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
         );
       }
 
-      if (!execution.success) {
-        if (execution.mayHaveSucceeded || !execution.refundSafe) {
+      if (!hasBooleanDiscriminator(execution, "success")) {
+        return markManualIntervention(
+          config.store,
+          record,
+          executionClaimToken,
+          safeFailure(
+            "execution_uncertain",
+            "Execution adapter returned an invalid result after submission began",
+            false,
+          ),
+        );
+      }
+
+      if (execution.success === false) {
+        if (
+          typeof execution.refundSafe !== "boolean" ||
+          (Object.prototype.hasOwnProperty.call(
+            execution,
+            "mayHaveSucceeded",
+          ) && typeof execution.mayHaveSucceeded !== "boolean") ||
+          execution.mayHaveSucceeded === true ||
+          execution.refundSafe === false
+        ) {
           return markManualIntervention(
             config.store,
             record,
@@ -396,7 +423,8 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
         execution.confirmed !== true ||
         typeof execution.transaction !== "string" ||
         !execution.transaction.trim() ||
-        execution.network !== expectedExecutionNetwork
+        typeof execution.network !== "string" ||
+        !execution.network.trim()
       ) {
         return markManualIntervention(
           config.store,
@@ -410,6 +438,27 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
         );
       }
 
+      const executionTransaction = canonicalizeTransactionIdentifier(
+        execution.transaction,
+      );
+      const executionMetadata = parseAdapterMetadata(execution.metadata);
+      if (execution.network !== expectedExecutionNetwork) {
+        return markManualIntervention(
+          config.store,
+          record,
+          executionClaimToken,
+          safeFailure(
+            "execution_uncertain",
+            "Executor returned a confirmed receipt on the wrong destination network",
+            false,
+          ),
+          {
+            executionNetwork: execution.network,
+            executionTransaction,
+            metadata: executionMetadata,
+          },
+        );
+      }
       const executed = await config.store.transition({
         intentHash: record.intentHash,
         expectedRevision: record.revision,
@@ -419,9 +468,9 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
         patch: {
           claimToken: undefined,
           executionNetwork: execution.network,
-          executionTransaction: execution.transaction,
+          executionTransaction,
           failure: undefined,
-          metadata: execution.metadata,
+          metadata: executionMetadata,
         },
       });
       if (executed.kind === "updated") return executed.record;
@@ -435,7 +484,8 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
         executed,
         {
           executionNetwork: execution.network,
-          executionTransaction: execution.transaction,
+          executionTransaction,
+          metadata: executionMetadata,
         },
       );
     },
@@ -645,7 +695,9 @@ function createPaidRecord(
     paymentAsset: input.paymentRequirements.asset,
     paymentAmount: input.paymentRequirements.amount,
     paymentPayTo: input.paymentRequirements.payTo,
-    paymentTransaction: verified.settlement.transaction,
+    paymentTransaction: canonicalizeTransactionIdentifier(
+      verified.settlement.transaction,
+    ),
     executionAttempts: 0,
     refundAttempts: 0,
     createdAt: now,
@@ -660,6 +712,17 @@ function executionContext(record: IntentExecutionRecord): IntentExecutionContext
     record,
     idempotencyKey: record.intentHash,
   };
+}
+
+function hasBooleanDiscriminator<K extends string>(
+  value: unknown,
+  key: K,
+): value is Record<K, boolean> {
+  return (
+    value != null &&
+    typeof value === "object" &&
+    typeof (value as Record<string, unknown>)[key] === "boolean"
+  );
 }
 
 function verifyPolicyBinding(
@@ -694,7 +757,10 @@ function verifySimulation(
   record: IntentExecutionRecord,
   simulation: IntentSimulationResult,
 ): IntentFailure | undefined {
-  if (!simulation.success) {
+  if (
+    !hasBooleanDiscriminator(simulation, "success") ||
+    simulation.success === false
+  ) {
     return safeFailure(
       "simulation_failed",
       "Destination execution simulation failed",
@@ -851,7 +917,20 @@ async function runRefund(
     );
   }
 
-  if (refund.success) {
+  if (!hasBooleanDiscriminator(refund, "success")) {
+    return markManualIntervention(
+      config.store,
+      record,
+      refundClaimToken,
+      safeFailure(
+        "refund_uncertain",
+        "Refund adapter returned an invalid result after submission began",
+        false,
+      ),
+    );
+  }
+
+  if (refund.success === true) {
     if (
       refund.confirmed !== true ||
       typeof refund.transaction !== "string" ||
@@ -870,6 +949,10 @@ async function runRefund(
         ),
       );
     }
+    const refundTransaction = canonicalizeTransactionIdentifier(
+      refund.transaction,
+    );
+    const refundMetadata = parseAdapterMetadata(refund.metadata);
     if (refund.network !== record.paymentNetwork) {
       return markManualIntervention(
         config.store,
@@ -882,7 +965,8 @@ async function runRefund(
         ),
         {
           refundNetwork: refund.network,
-          refundTransaction: refund.transaction,
+          refundTransaction,
+          metadata: refundMetadata,
         },
       );
     }
@@ -897,9 +981,9 @@ async function runRefund(
         patch: {
           claimToken: undefined,
           refundNetwork: refund.network,
-          refundTransaction: refund.transaction,
+          refundTransaction,
           failure: undefined,
-          metadata: refund.metadata,
+          metadata: refundMetadata,
         },
       }),
     );
@@ -913,12 +997,18 @@ async function runRefund(
       refunded,
       {
         refundNetwork: refund.network,
-        refundTransaction: refund.transaction,
+        refundTransaction,
+        metadata: refundMetadata,
       },
     );
   }
 
-  if (refund.mayHaveSucceeded) {
+  if (
+    typeof refund.retryable !== "boolean" ||
+    (Object.prototype.hasOwnProperty.call(refund, "mayHaveSucceeded") &&
+      typeof refund.mayHaveSucceeded !== "boolean") ||
+    refund.mayHaveSucceeded === true
+  ) {
     return markManualIntervention(
       config.store,
       record,
@@ -1042,8 +1132,20 @@ function paymentTransition(
 
 function refundIdempotencyKey(record: IntentExecutionRecord): string {
   return record.duplicatePayment
-    ? `${record.intentHash}:refund:${record.paymentNetwork}:${record.paymentTransaction.toLowerCase()}`
+    ? `${record.intentHash}:refund:${record.paymentNetwork}:${canonicalizeTransactionIdentifier(record.paymentTransaction)}`
     : `${record.intentHash}:refund`;
+}
+
+function parseAdapterMetadata(
+  metadata: unknown,
+): Record<string, JsonValue> | undefined {
+  if (metadata === undefined) return undefined;
+  try {
+    const parsed = JsonRecordSchema.safeParse(metadata);
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function safeFailure(

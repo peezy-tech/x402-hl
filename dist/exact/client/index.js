@@ -7,7 +7,7 @@ import { arbitrum as arbitrum2 } from "viem/chains";
 
 // src/types.ts
 import { z } from "zod";
-var HyperliquidTokenIdRegex = /^[A-Za-z0-9]+:0x[0-9a-fA-F]{32,40}$/;
+var HyperliquidTokenIdRegex = /^[^:]+:0x[0-9a-fA-F]{32,40}$/;
 var Bytes32Regex = /^0x[0-9a-fA-F]{64}$/;
 var EvmAddressRegex = /^0x[0-9a-fA-F]{40}$/;
 var HexIntegerRegex = /^0x[0-9a-fA-F]+$/;
@@ -82,13 +82,16 @@ function createInfoClient(network, options) {
   return new hl.InfoClient({ transport });
 }
 var tokenInfoCache = /* @__PURE__ */ new Map();
-async function fetchHyperliquidTokenInfo(network, tokenId) {
+async function fetchHyperliquidTokenInfo(network, tokenId, signal) {
   assertHyperliquidNetwork(network);
   const cacheKey = `${network}:${tokenId.toLowerCase()}`;
   const cached = tokenInfoCache.get(cacheKey);
   if (cached) return cached;
   const client = createInfoClient(network);
-  const response = await client.tokenDetails({ tokenId });
+  const response = await client.tokenDetails(
+    { tokenId },
+    signal
+  );
   const info = {
     decimals: response.weiDecimals,
     symbol: response.name,

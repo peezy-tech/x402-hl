@@ -2,6 +2,33 @@
 
 Notable changes to `x402-hl` are recorded here.
 
+## [0.2.2] - 2026-07-24
+
+### Security
+
+- Pre-settlement intent verification now recovers the independently signed
+  Hyperliquid payment payer and, by default, requires it to match the recovered
+  execution-intent signer before funds move. Delegated-payer mode still
+  validates the payment signature and binds the settlement receipt to its
+  recovered payment payer.
+- Signed intent envelopes and their inner intent objects now reject unknown
+  fields, forged declared signers, unsafe numeric values, and non-canonical
+  runtime inputs.
+- Settlement reconciliation and explorer confirmation share bounded deadlines
+  and match the complete signed action, including its signature chain id.
+
+### Fixed
+
+- Canonicalized transaction identifiers and quote gateway identity at durable
+  store boundaries.
+- Routed alternate finalized payment options for the same quote and intent to
+  durable duplicate-payment refund records instead of losing their settlement
+  evidence to a quote conflict.
+- Accepted the known server-declaration fields that `@x402/core` echoes into a
+  signed client extension while still rejecting unknown envelope fields.
+- Preserved confirmed-but-invalid or wrong-network adapter outcomes for manual
+  intervention rather than discarding receipt evidence.
+
 ## [0.2.1] - 2026-07-24
 
 ### Security

@@ -5,12 +5,13 @@ import type {
 } from "@x402/core/types";
 import type { Address, Hex } from "viem";
 import { getAddress } from "viem";
+import { verifyExactHyperliquidPayment } from "../../exact/facilitator/verification";
 import {
   ExecutionIntentDomain,
   ExecutionIntentDomainSchema,
   HyperEvmExecutionIntent,
   IntentFailureReason,
-  SignedHyperEvmExecutionIntentSchema,
+  SignedHyperEvmExecutionIntent,
 } from "../types";
 import { hashPaymentRequirements, verifyIntentPaymentExtra } from "../payment";
 import {
@@ -18,6 +19,7 @@ import {
   hashExecutionIntentTemplate,
   normalizeExecutionIntent,
 } from "../typed-data";
+import { readSignedExecutionIntent } from "../extension";
 import { verifyExecutionIntentSignature } from "../signature";
 
 export interface PreSettlementIntentVerificationInput {
@@ -34,12 +36,13 @@ export interface PreSettlementIntentVerificationInput {
    * settlement latency into the refund state machine. Defaults to true.
    */
   enforceDeadline?: boolean;
+  /** Defaults to true and binds the signed intent to the Hyperliquid payer. */
+  requireSamePayer?: boolean;
 }
 
 export interface PaidIntentVerificationInput
   extends PreSettlementIntentVerificationInput {
   settleResponse?: SettleResponse;
-  requireSamePayer?: boolean;
 }
 
 export interface VerifiedPreSettlementExecutionIntent {
@@ -47,6 +50,7 @@ export interface VerifiedPreSettlementExecutionIntent {
   intentHash: Hex;
   intentTemplateHash: Hex;
   paymentRequirementsHash: Hex;
+  paymentPayer: Address;
   signer: Address;
 }
 
@@ -77,11 +81,19 @@ export type PaidIntentVerificationResult =
  * payment-requirements hash, domain, quote, template hash, payment binding,
  * deadline, and signature — so a resource server can reject an unpayable
  * intent before settling the HyperCore payment and burning the user's funds.
- * Settlement-dependent checks (settlement binding and payer/signer equality)
- * still require `verifyPaidExecutionIntent` after settlement.
+ * The intent signer is also bound to the payer declared by the independently
+ * signed Hyperliquid payment. Settlement receipt checks still require
+ * `verifyPaidExecutionIntent` after settlement.
  */
 export async function verifyPreSettlementExecutionIntent(
   input: PreSettlementIntentVerificationInput,
+): Promise<PreSettlementIntentVerificationResult> {
+  return verifyExecutionIntent(input, { allowExpiredPayment: false });
+}
+
+async function verifyExecutionIntent(
+  input: PreSettlementIntentVerificationInput,
+  options: { allowExpiredPayment: boolean },
 ): Promise<PreSettlementIntentVerificationResult> {
   let paymentRequirementsHash: Hex;
   let acceptedHash: Hex;
@@ -101,25 +113,21 @@ export async function verifyPreSettlementExecutionIntent(
     );
   }
 
-  const rawSignedIntent =
-    input.paymentPayload.extensions?.["x402-hl/intents"];
-  if (rawSignedIntent == null) {
-    return failure(
-      "missing_execution_intent",
-      "Payment payload does not include an x402-hl execution intent",
-    );
-  }
-
-  const parsedSignedIntent = SignedHyperEvmExecutionIntentSchema.safeParse(
-    rawSignedIntent,
-  );
-  if (!parsedSignedIntent.success) {
+  let signedIntent: SignedHyperEvmExecutionIntent | undefined;
+  try {
+    signedIntent = readSignedExecutionIntent(input.paymentPayload);
+  } catch {
     return failure(
       "malformed_extension_payload",
       "Payment payload contains a malformed x402-hl execution intent",
     );
   }
-  const signedIntent = parsedSignedIntent.data;
+  if (!signedIntent) {
+    return failure(
+      "missing_execution_intent",
+      "Payment payload does not include an x402-hl execution intent",
+    );
+  }
   const intent = signedIntent.intent;
 
   // Untrusted intents must fail closed rather than throw: normalization
@@ -208,7 +216,10 @@ export async function verifyPreSettlementExecutionIntent(
   }
 
   const now = input.now ?? Math.floor(Date.now() / 1000);
-  if (input.enforceDeadline !== false && intent.deadline < now) {
+  if (
+    input.enforceDeadline !== false &&
+    (!Number.isInteger(now) || intent.deadline < now)
+  ) {
     return failure(
       "execution_intent_expired",
       "Execution intent deadline has passed",
@@ -249,12 +260,55 @@ export async function verifyPreSettlementExecutionIntent(
     );
   }
 
+  const paymentVerification = await verifyExactHyperliquidPayment(
+    input.paymentPayload,
+    input.paymentRequirements,
+    { allowExpired: options.allowExpiredPayment },
+  );
+  if (!paymentVerification.isValid) {
+    if (
+      paymentVerification.invalidReason === "invalid_exact_hl_payload" ||
+      paymentVerification.invalidReason === "invalid_exact_hl_payload_signature" ||
+      paymentVerification.invalidReason ===
+        "invalid_exact_hl_payload_signer_mismatch"
+    ) {
+      return failure(
+        "malformed_extension_payload",
+        "Hyperliquid payment payload does not contain a valid payer signature",
+      );
+    }
+    return failure(
+      "payment_payload_requirements_mismatch",
+      "Signed Hyperliquid payment action does not satisfy the finalized requirements",
+    );
+  }
+
+  let paymentPayer: Address;
+  try {
+    paymentPayer = getAddress(paymentVerification.payer as string);
+  } catch {
+    return failure(
+      "malformed_extension_payload",
+      "Hyperliquid payment verification did not identify a valid payer",
+    );
+  }
+  if (
+    input.requireSamePayer !== false &&
+    paymentPayer !== getAddress(signature.signer)
+  ) {
+    return failure(
+      "execution_intent_payer_mismatch",
+      "Execution intent signer does not match the signed Hyperliquid payer",
+    );
+  }
+
   return {
     ok: true,
     intent,
     intentHash: expectedHash,
     intentTemplateHash,
     paymentRequirementsHash,
+    paymentPayer,
     signer: signature.signer,
   };
 }
@@ -276,8 +330,20 @@ export async function verifyPaidExecutionIntent(
     );
   }
 
-  const verified = await verifyPreSettlementExecutionIntent(input);
+  // A successful settlement can arrive after the signed payment TTL lapses.
+  // Re-run every binding and signature check, but do not orphan confirmed funds
+  // solely because settlement or reconciliation crossed that TTL.
+  const verified = await verifyExecutionIntent(input, {
+    allowExpiredPayment: true,
+  });
   if (!verified.ok) return verified;
+
+  if (payer !== verified.paymentPayer) {
+    return failure(
+      "execution_intent_payer_mismatch",
+      "Settled payer does not match the signed Hyperliquid payment payer",
+    );
+  }
 
   if (
     input.requireSamePayer !== false &&
@@ -322,13 +388,19 @@ function verifySettlement(
       "Execution requires confirmed successful settlement",
     );
   }
-  if (!settlement.payer?.trim()) {
+  if (
+    typeof settlement.payer !== "string" ||
+    !settlement.payer.trim()
+  ) {
     return failure(
       "missing_settled_payer",
       "Successful settlement must identify the payer",
     );
   }
-  if (!settlement.transaction?.trim()) {
+  if (
+    typeof settlement.transaction !== "string" ||
+    !settlement.transaction.trim()
+  ) {
     return failure(
       "missing_settlement_transaction",
       "Successful settlement must include a transaction identifier",
