@@ -41,6 +41,10 @@ test("production Postgres quote uniqueness folds gateway address case", () => {
     POSTGRES_INTENT_STORE_DDL,
     /ON x402_intent_payment \(application, lower\(gateway\), quote_id\)\s+WHERE primary_payment;/,
   );
+  assert.match(
+    POSTGRES_INTENT_STORE_CANONICALIZATION_MIGRATION_DDL,
+    /DROP INDEX x402_intent_quote;\s+CREATE UNIQUE INDEX x402_intent_quote\s+ON x402_intent_payment \(application, lower\(gateway\), quote_id\)\s+WHERE primary_payment;/,
+  );
 });
 
 test("production Postgres transaction identities share one durable canonical form", async () => {

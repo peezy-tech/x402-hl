@@ -113,22 +113,19 @@ async function verifyExecutionIntent(
     );
   }
 
-  const rawSignedIntent =
-    input.paymentPayload.extensions?.["x402-hl/intents"];
-  if (rawSignedIntent == null) {
-    return failure(
-      "missing_execution_intent",
-      "Payment payload does not include an x402-hl execution intent",
-    );
-  }
-
-  let signedIntent: SignedHyperEvmExecutionIntent;
+  let signedIntent: SignedHyperEvmExecutionIntent | undefined;
   try {
-    signedIntent = readSignedExecutionIntent(input.paymentPayload)!;
+    signedIntent = readSignedExecutionIntent(input.paymentPayload);
   } catch {
     return failure(
       "malformed_extension_payload",
       "Payment payload contains a malformed x402-hl execution intent",
+    );
+  }
+  if (!signedIntent) {
+    return failure(
+      "missing_execution_intent",
+      "Payment payload does not include an x402-hl execution intent",
     );
   }
   const intent = signedIntent.intent;

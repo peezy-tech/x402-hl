@@ -8,6 +8,7 @@ import type {
   PaymentRequirements,
   SettleResponse,
 } from "@x402/core/types";
+import { x402Client } from "@x402/core/client";
 import type { Hex } from "viem";
 import { keccak256, stringToBytes } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -29,6 +30,7 @@ import {
   type IntentDeclaration,
   type IntentExecutionStatus,
   normalizeExecutionIntent,
+  readSignedExecutionIntent,
   recoverExecutionIntentSigner,
   signExecutionIntent,
   stableJson,
@@ -36,7 +38,10 @@ import {
   X402_HL_INTENTS_EXTENSION,
   ZERO_ADDRESS,
 } from "../src/intents/index";
-import { signDeclaredExecutionIntent } from "../src/intents/client/index";
+import {
+  createExecutionIntentClientExtension,
+  signDeclaredExecutionIntent,
+} from "../src/intents/client/index";
 import {
   createIntentExecutor,
   createIntentQuote,
@@ -649,10 +654,10 @@ test("a failed account-bearing fallback preserves its error", async () => {
   assert.equal(calls, 2);
 });
 
-test("a wrapped rejected signing request is not retried", async () => {
+test("a wrapped string-coded rejected signing request is not retried", async () => {
   const fixture = await makeFixture();
   const rejection = Object.assign(new Error("User rejected the request"), {
-    code: 4001,
+    code: "4001",
   });
   const wrapped = new Error("wallet request failed", { cause: rejection });
   let calls = 0;
@@ -915,6 +920,29 @@ test("pre-settlement verification rejects unpayable intents before funds move", 
     const result = await verifyPreSettlementExecutionIntent({
       ...preSettlementInput(fixture),
       paymentPayload: { ...fixture.paymentPayload, extensions: {} },
+    });
+    expectFailure(result, "missing_execution_intent");
+  });
+
+  await t.test("optional declaration-only echo is a missing intent", async () => {
+    const plainRequirements = structuredClone(fixture.paymentRequirements);
+    delete plainRequirements.extra.x402HlIntent;
+    const createdPayment = await new ExactHyperliquidClient(
+      account,
+    ).createPaymentPayload(2, plainRequirements);
+    const result = await verifyPreSettlementExecutionIntent({
+      ...preSettlementInput(fixture),
+      paymentRequirements: plainRequirements,
+      paymentPayload: {
+        ...createdPayment,
+        accepted: structuredClone(plainRequirements),
+        extensions: {
+          [X402_HL_INTENTS_EXTENSION]: createIntentDeclaration(
+            fixture.quote.intent,
+            { required: false },
+          ),
+        },
+      },
     });
     expectFailure(result, "missing_execution_intent");
   });
@@ -1257,6 +1285,38 @@ test("malformed intent extension returns a typed failure", async t => {
           [X402_HL_INTENTS_EXTENSION]: {
             intentHash: "not-a-hash",
             signature: "not-a-signature",
+          },
+        },
+      },
+    });
+    assertFailure(result, "malformed_extension_payload");
+  });
+
+  await t.test("partial signed fields on an optional declaration", async () => {
+    const result = await verifyPaidExecutionIntent({
+      ...verificationInput(fixture),
+      paymentPayload: {
+        ...fixture.paymentPayload,
+        extensions: {
+          [X402_HL_INTENTS_EXTENSION]: {
+            ...createIntentDeclaration(fixture.quote.intent, { required: false }),
+            signature: fixture.signedIntent.signature,
+          },
+        },
+      },
+    });
+    assertFailure(result, "malformed_extension_payload");
+  });
+
+  await t.test("mismatched optional declaration-only echo", async () => {
+    const result = await verifyPaidExecutionIntent({
+      ...verificationInput(fixture),
+      paymentPayload: {
+        ...fixture.paymentPayload,
+        extensions: {
+          [X402_HL_INTENTS_EXTENSION]: {
+            ...createIntentDeclaration(fixture.quote.intent, { required: false }),
+            intentTemplateHash: HASH_B,
           },
         },
       },
@@ -2593,6 +2653,44 @@ test("the client honors optional and required intent declarations", async t => {
       },
     );
     assert.equal(signed, undefined);
+    assert.equal(approveCalls, 0);
+  });
+
+  await t.test("final plain payload preserves an unsigned declaration echo", async () => {
+    const declaration = createIntentDeclaration(fixture.quote.intent, {
+      required: false,
+    });
+    let approveCalls = 0;
+    const client = new x402Client((_version, available) => available[0])
+      .register(
+        "hyperliquid:testnet",
+        new ExactHyperliquidClient(account),
+      )
+      .registerExtension(
+        createExecutionIntentClientExtension({
+          signer: account,
+          domain: DOMAIN,
+          approve: () => {
+            approveCalls += 1;
+            return true;
+          },
+        }),
+      );
+
+    const paymentPayload = await client.createPaymentPayload(
+      declaredPaymentRequired(fixture, declaration, plainRequirements),
+    );
+    const extension = paymentPayload.extensions?.[
+      X402_HL_INTENTS_EXTENSION
+    ] as Record<string, unknown>;
+
+    assert.deepEqual(paymentPayload.accepted, plainRequirements);
+    assert.deepEqual(extension, declaration);
+    assert.equal("paymentRequirementsHash" in extension, false);
+    assert.equal("intentHash" in extension, false);
+    assert.equal("signature" in extension, false);
+    assert.equal("signer" in extension, false);
+    assert.equal(readSignedExecutionIntent(paymentPayload), undefined);
     assert.equal(approveCalls, 0);
   });
 

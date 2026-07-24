@@ -640,7 +640,7 @@ function isUserRejectedSigningError(error) {
     if (visited.has(current)) return false;
     visited.add(current);
     const candidate = current;
-    if (candidate.name === "UserRejectedRequestError" || candidate.code === 4001 || candidate.code === "ACTION_REJECTED") {
+    if (candidate.name === "UserRejectedRequestError" || candidate.code === 4001 || candidate.code === "4001" || candidate.code === "ACTION_REJECTED") {
       return true;
     }
     current = candidate.cause;
@@ -693,6 +693,17 @@ function attachSignedExecutionIntent(paymentPayload, signedIntent) {
 function readSignedExecutionIntent(paymentPayload) {
   const extension = paymentPayload.extensions?.[X402_HL_INTENTS_EXTENSION];
   if (extension == null) return void 0;
+  const declarationOnly = IntentDeclarationSchema.strict().safeParse(extension);
+  if (declarationOnly.success && !declarationOnly.data.required) {
+    const declaration = declarationOnly.data;
+    if (declaration.intentTemplateHash.toLowerCase() !== hashExecutionIntentTemplate(declaration.intent).toLowerCase()) {
+      throw new Error("Intent declaration template hash is invalid");
+    }
+    if (declaration.quoteId !== declaration.intent.quoteId) {
+      throw new Error("Intent declaration quote id is invalid");
+    }
+    return void 0;
+  }
   const parsed = PaymentSignedExecutionIntentSchema.parse(extension);
   if (parsed.intentTemplateHash != null && parsed.intentTemplateHash.toLowerCase() !== hashExecutionIntentTemplate(parsed.intent).toLowerCase()) {
     throw new Error("Intent declaration template hash is invalid");

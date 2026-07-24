@@ -424,6 +424,10 @@ SET payment_transaction = x402_canonical_transaction(payment_transaction),
         )
       END;
 
+DROP INDEX x402_intent_quote;
+CREATE UNIQUE INDEX x402_intent_quote
+  ON x402_intent_payment (application, lower(gateway), quote_id)
+  WHERE primary_payment;
 CREATE UNIQUE INDEX x402_intent_payment_tx_canonical
   ON x402_intent_payment (
     payment_network,

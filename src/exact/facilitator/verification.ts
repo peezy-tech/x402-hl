@@ -93,7 +93,7 @@ export async function verifyExactHyperliquidPayment(
         domain: {
           name: "HyperliquidSignTransaction",
           version: "1",
-          chainId: Number.parseInt(action.signatureChainId),
+          chainId: BigInt(action.signatureChainId),
           verifyingContract: "0x0000000000000000000000000000000000000000",
         },
         types: SendAssetTypes,

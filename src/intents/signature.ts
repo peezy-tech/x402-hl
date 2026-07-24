@@ -157,6 +157,7 @@ function isUserRejectedSigningError(error: unknown): boolean {
     if (
       candidate.name === "UserRejectedRequestError" ||
       candidate.code === 4001 ||
+      candidate.code === "4001" ||
       candidate.code === "ACTION_REJECTED"
     ) {
       return true;

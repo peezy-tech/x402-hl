@@ -6,6 +6,7 @@ import type {
 } from "@x402/core/types";
 import { SendAssetTypes } from "@nktkas/hyperliquid/api/exchange";
 import { signUserSignedAction } from "@nktkas/hyperliquid/signing";
+import { parseSignature } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { ExactHyperliquidScheme as ExactHyperliquidClient } from "../src/exact/client/index";
 import { ExactHyperliquidScheme as ExactHyperliquidFacilitator } from "../src/exact/facilitator/index";
@@ -60,6 +61,37 @@ async function resignPaymentPayload(
   return resigned;
 }
 
+async function resignPaymentPayloadWithExactChainId(
+  payload: PaymentPayload,
+  signatureChainId: `0x${string}`,
+): Promise<PaymentPayload> {
+  const resigned = structuredClone(payload);
+  const exact = resigned.payload as {
+    action: Parameters<typeof signUserSignedAction>[0]["action"];
+    signature: { r: string; s: string; v: 27 | 28 };
+  };
+  exact.action.signatureChainId = signatureChainId;
+  const signature = parseSignature(
+    await account.signTypedData({
+      domain: {
+        name: "HyperliquidSignTransaction",
+        version: "1",
+        chainId: BigInt(signatureChainId),
+        verifyingContract: "0x0000000000000000000000000000000000000000",
+      },
+      types: SendAssetTypes,
+      primaryType: "HyperliquidTransaction:SendAsset",
+      message: exact.action,
+    }),
+  );
+  exact.signature = {
+    r: signature.r,
+    s: signature.s,
+    v: signature.yParity === 0 ? 27 : 28,
+  };
+  return resigned;
+}
+
 test("facilitator verify recovers the signed Hyperliquid payer without network access", async () => {
   const payload = await signedPaymentPayload();
   const result = await new ExactHyperliquidFacilitator().verify(
@@ -85,6 +117,25 @@ test("facilitator accepts a valid non-Arbitrum signature chain ID", async () => 
   );
   assert.equal(result.isValid, true);
   assert.equal(result.payer, account.address);
+});
+
+test("facilitator preserves adjacent uint256 signature chain IDs", async () => {
+  const original = await signedPaymentPayload();
+  for (const signatureChainId of [
+    "0x20000000000000",
+    "0x20000000000001",
+  ] as const) {
+    const payload = await resignPaymentPayloadWithExactChainId(
+      original,
+      signatureChainId,
+    );
+    const result = await new ExactHyperliquidFacilitator().verify(
+      payload,
+      requirements,
+    );
+    assert.equal(result.isValid, true);
+    assert.equal(result.payer, account.address);
+  }
 });
 
 test("client and facilitator accept a valid token name ending in a space", async () => {
@@ -233,11 +284,16 @@ type FacilitatorInternals = {
   validateTtl(...args: unknown[]): boolean;
 };
 
-test("settlement cache distinguishes signed action chain IDs", async () => {
-  const original = await signedPaymentPayload();
-  const alternate = await resignPaymentPayload(original, action => {
-    action.signatureChainId = "0x1";
-  });
+test("settlement cache distinguishes adjacent uint256 chain IDs", async () => {
+  const base = await signedPaymentPayload();
+  const original = await resignPaymentPayloadWithExactChainId(
+    base,
+    "0x20000000000000",
+  );
+  const alternate = await resignPaymentPayloadWithExactChainId(
+    base,
+    "0x20000000000001",
+  );
   const facilitator = new ExactHyperliquidFacilitator();
   const internals = facilitator as unknown as FacilitatorInternals;
   const originalHash = `0x${"66".repeat(32)}`;
@@ -246,7 +302,7 @@ test("settlement cache distinguishes signed action chain IDs", async () => {
   internals.findConfirmedTransaction = async (...args: unknown[]) => {
     reconciliationCalls += 1;
     const payload = args[2] as { action: { signatureChainId: string } };
-    return payload.action.signatureChainId === "0x1"
+    return payload.action.signatureChainId === "0x20000000000001"
       ? alternateHash
       : originalHash;
   };

@@ -84,6 +84,22 @@ export function readSignedExecutionIntent(
 ): SignedHyperEvmExecutionIntent | undefined {
   const extension = paymentPayload.extensions?.[X402_HL_INTENTS_EXTENSION];
   if (extension == null) return undefined;
+
+  const declarationOnly = IntentDeclarationSchema.strict().safeParse(extension);
+  if (declarationOnly.success && !declarationOnly.data.required) {
+    const declaration = declarationOnly.data;
+    if (
+      declaration.intentTemplateHash.toLowerCase() !==
+      hashExecutionIntentTemplate(declaration.intent).toLowerCase()
+    ) {
+      throw new Error("Intent declaration template hash is invalid");
+    }
+    if (declaration.quoteId !== declaration.intent.quoteId) {
+      throw new Error("Intent declaration quote id is invalid");
+    }
+    return undefined;
+  }
+
   const parsed = PaymentSignedExecutionIntentSchema.parse(extension);
   if (
     parsed.intentTemplateHash != null &&

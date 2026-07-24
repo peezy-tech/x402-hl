@@ -178,7 +178,7 @@ async function verifyExactHyperliquidPayment(payload, requirements, options) {
         domain: {
           name: "HyperliquidSignTransaction",
           version: "1",
-          chainId: Number.parseInt(action.signatureChainId),
+          chainId: BigInt(action.signatureChainId),
           verifyingContract: "0x0000000000000000000000000000000000000000"
         },
         types: SendAssetTypes,
@@ -590,7 +590,7 @@ var ExactHyperliquidScheme = class {
     const destination = typeof action.destination === "string" ? action.destination.toLowerCase() : "";
     const token = typeof action.token === "string" ? action.token.toLowerCase() : "";
     const amount = typeof action.amount === "string" ? action.amount : "";
-    const signatureChainId = typeof action.signatureChainId === "string" ? String(Number.parseInt(action.signatureChainId)) : "";
+    const signatureChainId = typeof action.signatureChainId === "string" ? BigInt(action.signatureChainId).toString() : "";
     return [
       network,
       payload.user.toLowerCase(),

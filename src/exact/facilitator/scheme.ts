@@ -477,7 +477,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     const amount = typeof action.amount === "string" ? action.amount : "";
     const signatureChainId =
       typeof action.signatureChainId === "string"
-        ? String(Number.parseInt(action.signatureChainId))
+        ? BigInt(action.signatureChainId).toString()
         : "";
     return [
       network,
