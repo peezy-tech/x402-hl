@@ -1,6 +1,6 @@
 {
   "name": "x402-hl",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "Standalone Hyperliquid primitives and injected-wallet paywall for x402.",
   "license": "MIT",
@@ -21,6 +21,7 @@
     "http-402"
   ],
   "scripts": {
+    "audit:prod": "pnpm audit --prod --audit-level high",
     "build": "pnpm build:paywall && tsup",
     "build:paywall": "tsx src/paywall/build.ts",
     "compat:all": "pnpm compat:payment-identifier && pnpm compat:offer-receipt && pnpm compat:siwx && pnpm compat:intents && pnpm compat:mcp-axios",
@@ -39,35 +40,36 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.examples.json && tsc -p tsconfig.tests.json"
   },
   "dependencies": {
-    "@nktkas/hyperliquid": "^0.25.9",
-    "@tanstack/react-query": "^5.90.7",
-    "@wagmi/connectors": "^5.8.1",
-    "@x402/core": "^2.14.0",
-    "@x402/paywall": "^2.14.0",
-    "buffer": "^6.0.3",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "viem": "^2.39.3",
-    "wagmi": "^2.17.1",
-    "zod": "^3.24.2"
+    "@nktkas/hyperliquid": "^0.33.2",
+    "@x402/core": "^2.19.0",
+    "valibot": "^1.4.2",
+    "viem": "^2.55.8",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@craftamap/esbuild-plugin-html": "^0.9.0",
+    "@tanstack/react-query": "^5.100.14",
     "@types/express": "^5.0.3",
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@x402/axios": "^2.14.0",
-    "@x402/express": "^2.14.0",
-    "@x402/extensions": "^2.14.0",
-    "@x402/fetch": "^2.14.0",
-    "axios": "^1.16.0",
+    "@wagmi/connectors": "^5.11.2",
+    "@x402/axios": "^2.19.0",
+    "@x402/express": "^2.19.0",
+    "@x402/extensions": "^2.19.0",
+    "@x402/fetch": "^2.19.0",
+    "@x402/paywall": "^2.19.0",
+    "axios": "^1.18.0",
+    "buffer": "^6.0.3",
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
     "esbuild": "^0.25.4",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
     "tsup": "^8.4.0",
     "tsx": "^4.20.3",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "wagmi": "^2.19.5"
   },
   "exports": {
     ".": {

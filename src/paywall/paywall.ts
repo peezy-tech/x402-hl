@@ -1,4 +1,4 @@
-import type { PaymentRequired } from "@x402/paywall";
+import type { PaymentRequired } from "./types";
 import { getHyperliquidTemplate } from "./template-loader";
 
 interface PaywallHtmlOptions {

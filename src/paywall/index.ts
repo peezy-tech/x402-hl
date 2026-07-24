@@ -3,7 +3,7 @@ import type {
   PaymentRequirements,
   PaymentRequired,
   PaywallConfig,
-} from "@x402/paywall";
+} from "./types";
 import { getHyperliquidPaywallHtml } from "./paywall";
 
 export const hyperliquidPaywall: PaywallNetworkHandler = {

@@ -1,6 +1,7 @@
 // src/exact/client/scheme.ts
-import { parser, SendAssetRequest, SendAssetTypes } from "@nktkas/hyperliquid/api/exchange";
+import { SendAssetRequest, SendAssetTypes } from "@nktkas/hyperliquid/api/exchange";
 import { signUserSignedAction } from "@nktkas/hyperliquid/signing";
+import { parse } from "valibot";
 import { toHex as toHex2 } from "viem";
 import { arbitrum as arbitrum2 } from "viem/chains";
 
@@ -109,7 +110,7 @@ var ExactHyperliquidScheme = class {
     const signerAddress = this.getSignerAddress();
     const decimals = await this.resolveDecimals(paymentRequirements);
     const nonce = Date.now();
-    const request = parser(SendAssetRequest)({
+    const request = parse(SendAssetRequest, {
       action: {
         type: "sendAsset",
         signatureChainId: toHex2(arbitrum2.id),

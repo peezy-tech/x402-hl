@@ -8,8 +8,7 @@ import {
 import type { InfoClient } from "@nktkas/hyperliquid";
 import type { UserNonFundingLedgerUpdatesResponse } from "@nktkas/hyperliquid/api/info";
 import { SendAssetTypes } from "@nktkas/hyperliquid/api/exchange";
-import { recoverUserFromUserSigned } from "@nktkas/hyperliquid/utils";
-import { getAddress } from "viem";
+import { getAddress, recoverTypedDataAddress } from "viem";
 import { ExactHyperliquidPayload, ExactHyperliquidPayloadSchema } from "../../types";
 import {
   HYPERLIQUID_WILDCARD_CAIP2,
@@ -139,14 +138,21 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
 
     let recoveredPayer: string;
     try {
-      recoveredPayer = await recoverUserFromUserSigned({
-        action:
-          action as Parameters<typeof recoverUserFromUserSigned>[0]["action"],
+      recoveredPayer = await recoverTypedDataAddress({
+        domain: {
+          name: "HyperliquidSignTransaction",
+          version: "1",
+          chainId: Number.parseInt(action.signatureChainId),
+          verifyingContract: "0x0000000000000000000000000000000000000000",
+        },
         types: SendAssetTypes,
-        signature:
-          exactPayload.signature as Parameters<
-            typeof recoverUserFromUserSigned
-          >[0]["signature"],
+        primaryType: "HyperliquidTransaction:SendAsset",
+        message: action,
+        signature: {
+          r: exactPayload.signature.r as `0x${string}`,
+          s: exactPayload.signature.s as `0x${string}`,
+          yParity: exactPayload.signature.v - 27,
+        },
       });
     } catch {
       return {
@@ -364,7 +370,6 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
   }
 
   private async confirmTransaction(
-    client: InfoClient,
     hash: string,
     payer: string,
     payload: ExactHyperliquidPayload,
@@ -372,7 +377,10 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
   ): Promise<boolean> {
     for (let i = 0; i < 3; i++) {
       try {
-        const tx = await fetchTransactionDetails(client, hash as `0x${string}`);
+        const tx = await fetchTransactionDetails(
+          requirements.network,
+          hash as `0x${string}`,
+        );
         if (tx.error != null || tx.user.toLowerCase() !== payer.toLowerCase()) {
           return false;
         }
@@ -435,7 +443,6 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
           if (
             /^0x[0-9a-fA-F]{64}$/.test(candidate.hash) &&
             (await this.confirmTransaction(
-              client,
               candidate.hash,
               payer,
               payload,

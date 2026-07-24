@@ -2,6 +2,23 @@
 
 Notable changes to `x402-hl` are recorded here.
 
+## [0.2.1] - 2026-07-24
+
+### Security
+
+- Upgraded `@nktkas/hyperliquid` to the patched Valibot dependency line.
+- Removed the pre-bundled paywall build toolchain from runtime dependencies, so
+  server and facilitator consumers no longer install unrelated wallet
+  connectors and their vulnerable transitive packages.
+- Added production-dependency and fresh-tarball consumer audits to CI and
+  trusted publishing.
+
+### Changed
+
+- Paywall handler declarations now use a local structural type compatible with
+  `@x402/paywall`; the generated browser paywall remains fully bundled.
+- Updated upstream x402 compatibility probes to the current 2.19 release line.
+
 ## [0.2.0] - 2026-07-24
 
 ### Added

@@ -127,14 +127,17 @@ const explicitPayload = await createSIWxPayload(
   },
   account,
 );
-const messageValidation = await validateSIWxMessage(explicitPayload, RESOURCE_URL);
+const messageValidation = await validateSIWxMessage(explicitPayload, new URL(RESOURCE_URL));
 const signatureVerification = await verifySIWxSignature(explicitPayload);
-assertEqual(messageValidation.valid, true, "explicit SIWX message validation");
-assertEqual(signatureVerification.valid, true, "explicit SIWX signature verification");
+assertEqual(messageValidation.isValid, true, "explicit SIWX message validation");
+assertEqual(signatureVerification.isValid, true, "explicit SIWX signature verification");
 
 const storage = new InMemorySIWxStorage();
 storage.recordPayment(RESOURCE_PATH, account.address);
-const resourceExtension = createSIWxResourceServerExtension({ storage });
+const resourceExtension = createSIWxResourceServerExtension({
+  storage,
+  origin: new URL(RESOURCE_URL).origin,
+});
 const protectedRequestResult = await resourceExtension.transportHooks?.http?.onProtectedRequest?.(
   directDeclarationFor(EIP155_ARBITRUM),
   {
@@ -180,8 +183,8 @@ const result: ProbeResult = {
     paymentNetwork: paymentRequirement.network,
     authNetwork: EIP155_ARBITRUM,
     supportedChains: explicit.supportedChains,
-    signatureValid: signatureVerification.valid,
-    messageValid: messageValidation.valid,
+    signatureValid: signatureVerification.isValid,
+    messageValid: messageValidation.isValid,
     protectedRequestGrant: protectedRequestGranted,
     httpClientHeader: Boolean(explicitHeaders?.[SIGN_IN_WITH_X]),
     wrapFetchRetries: explicitWrapRetries > 1,
@@ -198,7 +201,10 @@ console.log(JSON.stringify(result, null, 2));
 
 async function enrichSIWxDeclaration(options: Parameters<typeof declareSIWxExtension>[0]): Promise<SIWxWireExtension> {
   const declaration = directDeclarationFor(options?.network, options?.statement);
-  const extension = createSIWxResourceServerExtension({ storage: new InMemorySIWxStorage() });
+  const extension = createSIWxResourceServerExtension({
+    storage: new InMemorySIWxStorage(),
+    origin: new URL(RESOURCE_URL).origin,
+  });
   const enriched = await extension.enrichPaymentRequiredResponse?.(declaration[SIGN_IN_WITH_X], {
     requirements: [paymentRequirement],
     resourceInfo: {
@@ -221,7 +227,6 @@ async function enrichSIWxDeclaration(options: Parameters<typeof declareSIWxExten
 function directDeclarationFor(network?: string | string[], statement?: string): Record<string, unknown> {
   return declareSIWxExtension({
     network,
-    resourceUri: RESOURCE_URL,
     statement,
     expirationSeconds: 300,
   });

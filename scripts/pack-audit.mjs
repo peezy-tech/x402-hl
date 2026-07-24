@@ -1,4 +1,9 @@
-import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -63,6 +68,55 @@ if (!archive.endsWith(`/${expectedName}`)) {
   throw new Error(`Expected archive name ${expectedName}, got ${archive}`);
 }
 
+const consumer = mkdtempSync(join(tmpdir(), "x402-hl-consumer-"));
+writeFileSync(
+  join(consumer, "package.json"),
+  JSON.stringify({
+    name: "x402-hl-release-consumer",
+    private: true,
+    type: "module",
+  }),
+);
+writeFileSync(
+  join(consumer, "index.ts"),
+  `import * as root from "x402-hl";
+import * as exactClient from "x402-hl/exact/client";
+import * as exactServer from "x402-hl/exact/server";
+import * as exactFacilitator from "x402-hl/exact/facilitator";
+import * as intents from "x402-hl/intents";
+import * as intentsClient from "x402-hl/intents/client";
+import * as intentsServer from "x402-hl/intents/server";
+import * as paywall from "x402-hl/paywall";
+void [root, exactClient, exactServer, exactFacilitator, intents, intentsClient, intentsServer, paywall];
+`,
+);
+run("npm", ["install", "--ignore-scripts", archive], consumer);
+run(
+  "node",
+  [
+    "--input-type=module",
+    "-e",
+    `for (const name of ${JSON.stringify(Object.keys(packageJson.exports))}) await import(name === "." ? "x402-hl" : \`x402-hl\${name.slice(1)}\`);`,
+  ],
+  consumer,
+);
+run(
+  join(packageRoot, "node_modules", ".bin", "tsc"),
+  [
+    "--noEmit",
+    "--module",
+    "NodeNext",
+    "--moduleResolution",
+    "NodeNext",
+    "--target",
+    "ES2022",
+    "--skipLibCheck",
+    "index.ts",
+  ],
+  consumer,
+);
+run("npm", ["audit", "--omit=dev", "--audit-level=high"], consumer);
+
 console.log(
   JSON.stringify(
     {
@@ -71,6 +125,11 @@ console.log(
       version: packageJson.version,
       files: listing.filter(entry => !entry.endsWith("/")).length,
       required,
+      freshConsumer: {
+        runtimeImports: true,
+        typeImports: true,
+        productionAudit: true,
+      },
     },
     null,
     2,
