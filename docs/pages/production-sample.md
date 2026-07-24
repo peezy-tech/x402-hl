@@ -277,7 +277,7 @@ CREATE UNIQUE INDEX intents_primary_intent_uq
   ON intent_payments (intent_hash)
   WHERE primary_payment;
 CREATE UNIQUE INDEX intents_primary_quote_uq
-  ON intent_payments (application, gateway, quote_id)
+  ON intent_payments (application, lower(gateway), quote_id)
   WHERE primary_payment;
 CREATE UNIQUE INDEX intents_execution_tx_uq
   ON intent_payments (execution_network, execution_transaction)

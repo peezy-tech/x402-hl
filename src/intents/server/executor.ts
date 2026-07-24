@@ -398,7 +398,8 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
         execution.confirmed !== true ||
         typeof execution.transaction !== "string" ||
         !execution.transaction.trim() ||
-        execution.network !== expectedExecutionNetwork
+        typeof execution.network !== "string" ||
+        !execution.network.trim()
       ) {
         return markManualIntervention(
           config.store,
@@ -416,6 +417,23 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
         execution.transaction,
       );
       const executionMetadata = parseAdapterMetadata(execution.metadata);
+      if (execution.network !== expectedExecutionNetwork) {
+        return markManualIntervention(
+          config.store,
+          record,
+          executionClaimToken,
+          safeFailure(
+            "execution_uncertain",
+            "Executor returned a confirmed receipt on the wrong destination network",
+            false,
+          ),
+          {
+            executionNetwork: execution.network,
+            executionTransaction,
+            metadata: executionMetadata,
+          },
+        );
+      }
       const executed = await config.store.transition({
         intentHash: record.intentHash,
         expectedRevision: record.revision,

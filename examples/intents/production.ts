@@ -276,7 +276,7 @@ CREATE UNIQUE INDEX x402_intent_primary
   ON x402_intent_payment (intent_hash)
   WHERE primary_payment;
 CREATE UNIQUE INDEX x402_intent_quote
-  ON x402_intent_payment (application, gateway, quote_id)
+  ON x402_intent_payment (application, lower(gateway), quote_id)
   WHERE primary_payment;
 CREATE UNIQUE INDEX x402_intent_execution_tx
   ON x402_intent_payment (execution_network, execution_transaction)

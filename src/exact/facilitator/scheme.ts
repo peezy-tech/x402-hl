@@ -642,6 +642,12 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     accepted: PaymentRequirements,
     required: PaymentRequirements,
   ): boolean {
+    if (
+      typeof accepted.payTo !== "string" ||
+      typeof required.payTo !== "string"
+    ) {
+      return false;
+    }
     return (
       accepted.scheme === required.scheme &&
       accepted.network === required.network &&
@@ -669,9 +675,14 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
   }
 
   private decimalToAtomic(value: string, decimals: number): bigint {
-    const [whole, fraction = ""] = value.trim().split(".");
-    const normalizedFraction = fraction.padEnd(decimals, "0").slice(0, decimals);
-    return BigInt(whole || "0") * 10n ** BigInt(decimals) + BigInt(normalizedFraction || "0");
+    const match = /^(\d+)(?:\.(\d+))?$/.exec(value.trim());
+    if (!match) throw new Error("invalid decimal amount");
+    const [, whole, fraction = ""] = match;
+    if (/[1-9]/.test(fraction.slice(decimals))) {
+      throw new Error("decimal amount exceeds token precision");
+    }
+    const normalizedFraction = fraction.slice(0, decimals).padEnd(decimals, "0");
+    return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(normalizedFraction || "0");
   }
 
   private validateTtl(actionTime: unknown, maxTimeoutSeconds: number): boolean {

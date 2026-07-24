@@ -793,7 +793,7 @@ async function verifyPreSettlementExecutionIntent(input) {
     );
   }
   const now = input.now ?? Math.floor(Date.now() / 1e3);
-  if (input.enforceDeadline !== false && intent.deadline < now) {
+  if (input.enforceDeadline !== false && (!Number.isInteger(now) || intent.deadline < now)) {
     return failure(
       "execution_intent_expired",
       "Execution intent deadline has passed"
@@ -888,13 +888,13 @@ function verifySettlement(input) {
       "Execution requires confirmed successful settlement"
     );
   }
-  if (!settlement.payer?.trim()) {
+  if (typeof settlement.payer !== "string" || !settlement.payer.trim()) {
     return failure(
       "missing_settled_payer",
       "Successful settlement must identify the payer"
     );
   }
-  if (!settlement.transaction?.trim()) {
+  if (typeof settlement.transaction !== "string" || !settlement.transaction.trim()) {
     return failure(
       "missing_settlement_transaction",
       "Successful settlement must include a transaction identifier"
@@ -1413,7 +1413,7 @@ function createIntentExecutor(config) {
         );
       }
       const expectedExecutionNetwork = `eip155:${record.intent.chainId}`;
-      if (execution.confirmed !== true || typeof execution.transaction !== "string" || !execution.transaction.trim() || execution.network !== expectedExecutionNetwork) {
+      if (execution.confirmed !== true || typeof execution.transaction !== "string" || !execution.transaction.trim() || typeof execution.network !== "string" || !execution.network.trim()) {
         return markManualIntervention(
           config.store,
           record,
@@ -1429,6 +1429,23 @@ function createIntentExecutor(config) {
         execution.transaction
       );
       const executionMetadata = parseAdapterMetadata(execution.metadata);
+      if (execution.network !== expectedExecutionNetwork) {
+        return markManualIntervention(
+          config.store,
+          record,
+          executionClaimToken,
+          safeFailure(
+            "execution_uncertain",
+            "Executor returned a confirmed receipt on the wrong destination network",
+            false
+          ),
+          {
+            executionNetwork: execution.network,
+            executionTransaction,
+            metadata: executionMetadata
+          }
+        );
+      }
       const executed = await config.store.transition({
         intentHash: record.intentHash,
         expectedRevision: record.revision,

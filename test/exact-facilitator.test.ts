@@ -104,6 +104,56 @@ test("client and facilitator accept a valid token name ending in a space", async
   assert.equal(result.payer, account.address);
 });
 
+test("facilitator rejects signed amounts exceeding token precision", async () => {
+  const payload = await resignPaymentPayload(
+    await signedPaymentPayload(),
+    action => {
+      action.amount = "0.010000009";
+    },
+  );
+
+  const result = await new ExactHyperliquidFacilitator().verify(
+    payload,
+    requirements,
+  );
+  assert.equal(result.isValid, false);
+  assert.equal(
+    result.invalidReason,
+    "invalid_exact_hl_payload_amount_mismatch",
+  );
+});
+
+test("facilitator accepts redundant zero digits beyond token precision", async () => {
+  const payload = await resignPaymentPayload(
+    await signedPaymentPayload(),
+    action => {
+      action.amount = "0.010000000";
+    },
+  );
+
+  const result = await new ExactHyperliquidFacilitator().verify(
+    payload,
+    requirements,
+  );
+  assert.equal(result.isValid, true);
+  assert.equal(result.payer, account.address);
+});
+
+test("facilitator rejects malformed accepted.payTo without throwing", async () => {
+  const payload = await signedPaymentPayload();
+  const accepted = payload.accepted as unknown as { payTo: unknown };
+  accepted.payTo = null;
+  const facilitator = new ExactHyperliquidFacilitator();
+
+  const verification = await facilitator.verify(payload, requirements);
+  assert.equal(verification.isValid, false);
+  assert.equal(verification.invalidReason, "invalid_exact_hl_payload");
+
+  const settlement = await facilitator.settle(payload, requirements);
+  assert.equal(settlement.success, false);
+  assert.equal(settlement.errorReason, "invalid_exact_hl_payload");
+});
+
 test("facilitator still rejects the wrong Hyperliquid environment", async () => {
   const payload = await resignPaymentPayload(
     await signedPaymentPayload(),
@@ -333,6 +383,16 @@ test("facilitator recognizes the public spotTransfer ledger candidate shape", ()
       {
         ...update,
         delta: { ...update.delta, destination: OTHER_USER },
+      },
+      expected,
+    ),
+    false,
+  );
+  assert.equal(
+    facilitator.ledgerUpdateMatchesPayment(
+      {
+        ...update,
+        delta: { ...update.delta, amount: "0.010000009" },
       },
       expected,
     ),

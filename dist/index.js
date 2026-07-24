@@ -652,6 +652,9 @@ var ExactHyperliquidScheme2 = class {
     return Boolean(payloadTokenId && requiredTokenId && payloadTokenId === requiredTokenId);
   }
   paymentRequirementsMatch(accepted, required) {
+    if (typeof accepted.payTo !== "string" || typeof required.payTo !== "string") {
+      return false;
+    }
     return accepted.scheme === required.scheme && accepted.network === required.network && accepted.asset === required.asset && accepted.amount === required.amount && accepted.payTo.toLowerCase() === required.payTo.toLowerCase() && accepted.maxTimeoutSeconds === required.maxTimeoutSeconds;
   }
   validateAmount(payloadAmount, requiredAmount, decimals) {
@@ -666,9 +669,14 @@ var ExactHyperliquidScheme2 = class {
     }
   }
   decimalToAtomic(value, decimals) {
-    const [whole, fraction = ""] = value.trim().split(".");
-    const normalizedFraction = fraction.padEnd(decimals, "0").slice(0, decimals);
-    return BigInt(whole || "0") * 10n ** BigInt(decimals) + BigInt(normalizedFraction || "0");
+    const match = /^(\d+)(?:\.(\d+))?$/.exec(value.trim());
+    if (!match) throw new Error("invalid decimal amount");
+    const [, whole, fraction = ""] = match;
+    if (/[1-9]/.test(fraction.slice(decimals))) {
+      throw new Error("decimal amount exceeds token precision");
+    }
+    const normalizedFraction = fraction.slice(0, decimals).padEnd(decimals, "0");
+    return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(normalizedFraction || "0");
   }
   validateTtl(actionTime, maxTimeoutSeconds) {
     if (typeof actionTime !== "number") return false;

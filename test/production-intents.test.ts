@@ -6,6 +6,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import {
   createOfflineChainAdapter,
   createProductionExecutor,
+  POSTGRES_INTENT_STORE_DDL,
   createTransferQuote,
   executeSettledIntent,
   signClientIntent,
@@ -28,6 +29,13 @@ function basePaymentPayload(
     payload: { user: account.address },
   };
 }
+
+test("production Postgres quote uniqueness folds gateway address case", () => {
+  assert.match(
+    POSTGRES_INTENT_STORE_DDL,
+    /ON x402_intent_payment \(application, lower\(gateway\), quote_id\)\s+WHERE primary_payment;/,
+  );
+});
 
 async function productionFixture(paymentIdentifier: string) {
   const transfer = createTransferQuote({

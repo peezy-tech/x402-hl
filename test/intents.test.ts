@@ -539,6 +539,17 @@ test("verification binds settlement transaction, network, and exact amount", asy
     assertFailure(result, "missing_settlement_transaction");
   });
 
+  await t.test("non-string settlement transaction fails closed", async () => {
+    const result = await verifyPaidExecutionIntent({
+      ...verificationInput(fixture),
+      settleResponse: {
+        ...fixture.settleResponse,
+        transaction: 456,
+      } as unknown as SettleResponse,
+    });
+    assertFailure(result, "missing_settlement_transaction");
+  });
+
   await t.test("settlement network mismatch", async () => {
     const result = await verifyPaidExecutionIntent({
       ...verificationInput(fixture),
@@ -572,6 +583,17 @@ test("verification requires a settled payer and enforces payer/signer equality",
         ...fixture.settleResponse,
         payer: undefined,
       },
+    });
+    assertFailure(result, "missing_settled_payer");
+  });
+
+  await t.test("non-string payer fails closed", async () => {
+    const result = await verifyPaidExecutionIntent({
+      ...verificationInput(fixture),
+      settleResponse: {
+        ...fixture.settleResponse,
+        payer: 123,
+      } as unknown as SettleResponse,
     });
     assertFailure(result, "missing_settled_payer");
   });
@@ -644,6 +666,14 @@ test("pre-settlement verification rejects unpayable intents before funds move", 
       paymentRequirements,
     });
     expectFailure(result, "payment_payload_requirements_mismatch");
+  });
+
+  await t.test("a NaN verification clock fails closed", async () => {
+    const result = await verifyPreSettlementExecutionIntent({
+      ...preSettlementInput(fixture),
+      now: Number.NaN,
+    });
+    expectFailure(result, "execution_intent_expired");
   });
 
   await t.test("expired deadline fails by default", async () => {
@@ -2147,6 +2177,49 @@ test("a confirmed execution without a transaction string requires manual interve
   const receipt = await executor.execute(executionInput(fixture));
   assert.equal(receipt.status, "manual_intervention");
   assert.equal(receipt.failure?.reason, "execution_uncertain");
+  assert.equal(refundCalls, 0);
+});
+
+test("a confirmed execution on the wrong network preserves receipt evidence", async () => {
+  const fixture = await makeFixture();
+  const store = new InMemoryIntentExecutionStore();
+  let executionCalls = 0;
+  let refundCalls = 0;
+  const executor = createIntentExecutor(
+    executorConfig(store, {
+      execute: async () => {
+        executionCalls += 1;
+        return {
+          success: true,
+          confirmed: true,
+          transaction: ` ${EXECUTION_TX.toUpperCase()}\t`,
+          network: "eip155:999",
+          metadata: { provider: "destination" },
+        };
+      },
+      refund: async () => {
+        refundCalls += 1;
+        return { success: false, retryable: false };
+      },
+    }),
+  );
+
+  const receipt = await executor.execute(executionInput(fixture));
+  assert.equal(receipt.status, "manual_intervention");
+  assert.equal(receipt.failure?.reason, "execution_uncertain");
+  assert.equal(receipt.executionNetwork, "eip155:999");
+  assert.equal(receipt.executionTransaction, EXECUTION_TX);
+  assert.deepEqual(receipt.metadata, { provider: "destination" });
+  assert.equal(refundCalls, 0);
+
+  const durable = await store.get(receipt.intentHash);
+  assert.equal(durable?.executionNetwork, "eip155:999");
+  assert.equal(durable?.executionTransaction, EXECUTION_TX);
+  assert.deepEqual(durable?.metadata, { provider: "destination" });
+
+  const replay = await executor.execute(executionInput(fixture));
+  assert.equal(replay.status, "manual_intervention");
+  assert.equal(executionCalls, 1);
   assert.equal(refundCalls, 0);
 });
 
