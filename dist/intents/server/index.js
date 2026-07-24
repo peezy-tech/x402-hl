@@ -999,6 +999,9 @@ function normalizeDecimal(value) {
 
 // src/intents/server/verification.ts
 async function verifyPreSettlementExecutionIntent(input) {
+  return verifyExecutionIntent(input, { allowExpiredPayment: false });
+}
+async function verifyExecutionIntent(input, options) {
   let paymentRequirementsHash;
   let acceptedHash;
   try {
@@ -1139,7 +1142,7 @@ async function verifyPreSettlementExecutionIntent(input) {
   const paymentVerification = await verifyExactHyperliquidPayment(
     input.paymentPayload,
     input.paymentRequirements,
-    { allowExpired: false }
+    { allowExpired: options.allowExpiredPayment }
   );
   if (!paymentVerification.isValid) {
     if (paymentVerification.invalidReason === "invalid_exact_hl_payload" || paymentVerification.invalidReason === "invalid_exact_hl_payload_signature" || paymentVerification.invalidReason === "invalid_exact_hl_payload_signer_mismatch") {
@@ -1191,7 +1194,9 @@ async function verifyPaidExecutionIntent(input) {
       "Successful settlement must identify a valid EVM payer"
     );
   }
-  const verified = await verifyPreSettlementExecutionIntent(input);
+  const verified = await verifyExecutionIntent(input, {
+    allowExpiredPayment: true
+  });
   if (!verified.ok) return verified;
   if (payer !== verified.paymentPayer) {
     return failure(
