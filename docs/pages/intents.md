@@ -152,14 +152,16 @@ commitment and otherwise sends a normal payment without one.
 
 ## Verify Before Settlement
 
-Settlement moves the user's funds, so run every settlement-independent check
-first. `verifyPreSettlementExecutionIntent` verifies intent presence, canonical
-shape, the payment-requirements hash, domain, quote id, template hash, payment
-binding, deadline, and signature without a settlement response. A payment
+Settlement moves the user's funds, so run every check that does not require a
+settlement response first. `verifyPreSettlementExecutionIntent` verifies intent
+presence, canonical shape, the payment-requirements hash, domain, quote id,
+template hash, payment binding, deadline, and intent signature. It also
+validates the signed Hyperliquid payment payload, recovers its payer, and by
+default requires that payer to match the recovered intent signer. A payment
 payload that fails here — for example a client that never attached a signed
-intent — must be rejected before settling, because `execute` refuses to
-register such a payload after settlement and the settled payment would have no
-durable record and no automated refund:
+intent or whose payment was signed by another payer — must be rejected before
+settling, because `execute` refuses to register such a payload after settlement
+and the settled payment would have no durable record and no automated refund:
 
 ```ts
 import {
@@ -188,9 +190,9 @@ the settlement-dependent checks below still run afterwards.
 ## Verify Again After Settlement
 
 `verifyPaidExecutionIntent` runs the same checks plus the settlement-dependent
-ones. It requires a successful settlement with a payer, transaction
-identifier, and matching network, and it also requires locally trusted domain,
-quote id, and template hash values:
+ones. It checks the receipt payer against the signer again and requires a
+successful settlement with a payer, transaction identifier, and matching
+network, along with locally trusted domain, quote id, and template hash values:
 
 ```ts
 import {

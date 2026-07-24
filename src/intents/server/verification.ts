@@ -13,7 +13,6 @@ import {
   HyperEvmExecutionIntent,
   IntentFailureReason,
   SignedHyperEvmExecutionIntent,
-  SignedHyperEvmExecutionIntentSchema,
 } from "../types";
 import { hashPaymentRequirements, verifyIntentPaymentExtra } from "../payment";
 import {
@@ -21,6 +20,7 @@ import {
   hashExecutionIntentTemplate,
   normalizeExecutionIntent,
 } from "../typed-data";
+import { readSignedExecutionIntent } from "../extension";
 import { verifyExecutionIntentSignature } from "../signature";
 
 export interface PreSettlementIntentVerificationInput {
@@ -117,7 +117,7 @@ export async function verifyPreSettlementExecutionIntent(
 
   let signedIntent: SignedHyperEvmExecutionIntent;
   try {
-    signedIntent = SignedHyperEvmExecutionIntentSchema.parse(rawSignedIntent);
+    signedIntent = readSignedExecutionIntent(input.paymentPayload)!;
   } catch {
     return failure(
       "malformed_extension_payload",

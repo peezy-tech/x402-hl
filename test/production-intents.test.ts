@@ -12,6 +12,7 @@ import {
   signClientIntent,
   verifyIntentBeforeSettlement,
 } from "../examples/intents/production";
+import { ExactHyperliquidScheme as ExactHyperliquidClient } from "../src/exact/client/index";
 import { InMemoryIntentExecutionStore } from "../src/intents/server/index";
 
 const PRIVATE_KEY =
@@ -20,13 +21,15 @@ const account = privateKeyToAccount(PRIVATE_KEY);
 const RECIPIENT = "0x0000000000000000000000000000000000009999";
 const NOW = 1_900_000_000;
 
-function basePaymentPayload(
+async function basePaymentPayload(
   paymentRequirements: ReturnType<typeof createTransferQuote>["paymentRequirements"],
-): PaymentPayload {
+): Promise<PaymentPayload> {
+  const created = await new ExactHyperliquidClient(
+    account,
+  ).createPaymentPayload(2, paymentRequirements);
   return {
-    x402Version: 2,
+    ...created,
     accepted: structuredClone(paymentRequirements),
-    payload: { user: account.address },
   };
 }
 
@@ -55,7 +58,7 @@ test("production pre-settlement verification validates the payment identifier", 
   await t.test("the expected identifier passes", async () => {
     const { transfer, store } = await productionFixture(expectedIdentifier);
     const paymentPayload = await signClientIntent({
-      basePaymentPayload: basePaymentPayload(transfer.paymentRequirements),
+      basePaymentPayload: await basePaymentPayload(transfer.paymentRequirements),
       paymentRequired: transfer.paymentRequired,
       quote: transfer.quote,
       paymentIdentifier: expectedIdentifier,
@@ -78,7 +81,7 @@ test("production pre-settlement verification validates the payment identifier", 
   await t.test("a missing identifier is rejected before settlement", async () => {
     const { transfer, store } = await productionFixture(expectedIdentifier);
     const paymentPayload = await signClientIntent({
-      basePaymentPayload: basePaymentPayload(transfer.paymentRequirements),
+      basePaymentPayload: await basePaymentPayload(transfer.paymentRequirements),
       paymentRequired: transfer.paymentRequired,
       quote: transfer.quote,
       paymentIdentifier: expectedIdentifier,
@@ -106,7 +109,7 @@ test("production pre-settlement verification validates the payment identifier", 
     const aliasIdentifier = `0x${"41".repeat(16)}`;
     const { transfer, store } = await productionFixture(expectedIdentifier);
     const paymentPayload = await signClientIntent({
-      basePaymentPayload: basePaymentPayload(transfer.paymentRequirements),
+      basePaymentPayload: await basePaymentPayload(transfer.paymentRequirements),
       paymentRequired: transfer.paymentRequired,
       quote: transfer.quote,
       paymentIdentifier: aliasIdentifier,
@@ -135,7 +138,7 @@ test("post-settlement identifier defense rejects aliases before registration", a
   const aliasIdentifier = `0x${"41".repeat(16)}`;
   const { transfer, store } = await productionFixture(expectedIdentifier);
   const paymentPayload = await signClientIntent({
-    basePaymentPayload: basePaymentPayload(transfer.paymentRequirements),
+    basePaymentPayload: await basePaymentPayload(transfer.paymentRequirements),
     paymentRequired: transfer.paymentRequired,
     quote: transfer.quote,
     paymentIdentifier: aliasIdentifier,

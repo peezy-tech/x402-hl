@@ -215,9 +215,10 @@ Before requesting settlement, validate the upstream payment identifier against
 the persisted quote, then run `verifyPreSettlementExecutionIntent` (or the
 executor's `verifyBeforeSettlement`) with the same payload, requirements, and
 persisted quote values. A payload that fails either application-level binding or
-settlement-independent intent checks — a missing, malformed, mismatched, or
-unsigned intent — must be rejected without settling, because it can never be
-registered or automatically refunded afterwards.
+pre-settlement checks — a missing, malformed, mismatched, or unsigned intent,
+an invalid signed Hyperliquid payment payload, or a payment payer that differs
+from the recovered intent signer — must be rejected without settling, because
+it can never be registered or automatically refunded afterwards.
 
 After settlement, provide the actual payment payload, exact settled
 requirements, and facilitator response to paid-intent verification. Repeat the
@@ -253,7 +254,8 @@ if (!verified.ok) {
 This call requires `settleResponse.success === true`, a payer, a settlement
 transaction, a matching network, the locally expected domain/quote/template,
 the exact payment-requirements hash, an unexpired intent, and a valid payer
-signature. Never replace settlement evidence with a successful facilitator
+signature. The receipt payer is checked against the recovered intent signer
+again. Never replace settlement evidence with a successful facilitator
 `verify()` response.
 
 ## 4. Implement A Durable Store Adapter

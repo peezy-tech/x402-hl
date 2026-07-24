@@ -1,5 +1,7 @@
 import type { PaymentPayload, PaymentRequired } from "@x402/core/types";
+import { z } from "zod";
 import {
+  Bytes32Schema,
   HyperEvmExecutionIntentInput,
   IntentDeclaration,
   IntentDeclarationSchema,
@@ -12,6 +14,19 @@ import {
   hashExecutionIntentTemplate,
   normalizeExecutionIntent,
 } from "./typed-data";
+
+// @x402/core preserves the server declaration when it deep-merges the
+// client's signed extension into the payment payload. Admit only those known
+// declaration echo fields, validate their binding below, and continue to
+// reject every other unsigned envelope field.
+const PaymentSignedExecutionIntentSchema =
+  SignedHyperEvmExecutionIntentSchema.extend({
+    version: z.literal(X402_HL_INTENT_VERSION).optional(),
+    required: z.boolean().optional(),
+    mode: z.literal("brokered").optional(),
+    intentTemplateHash: Bytes32Schema.optional(),
+    quoteId: z.string().optional(),
+  }).strict();
 
 export interface IntentDeclarationOptions {
   required?: boolean;
@@ -67,7 +82,24 @@ export function attachSignedExecutionIntent(
 export function readSignedExecutionIntent(
   paymentPayload: PaymentPayload,
 ): SignedHyperEvmExecutionIntent | undefined {
-  const signedIntent = paymentPayload.extensions?.[X402_HL_INTENTS_EXTENSION];
-  if (signedIntent == null) return undefined;
-  return SignedHyperEvmExecutionIntentSchema.parse(signedIntent);
+  const extension = paymentPayload.extensions?.[X402_HL_INTENTS_EXTENSION];
+  if (extension == null) return undefined;
+  const parsed = PaymentSignedExecutionIntentSchema.parse(extension);
+  if (
+    parsed.intentTemplateHash != null &&
+    parsed.intentTemplateHash.toLowerCase() !==
+      hashExecutionIntentTemplate(parsed.intent).toLowerCase()
+  ) {
+    throw new Error("Intent declaration template hash is invalid");
+  }
+  if (parsed.quoteId != null && parsed.quoteId !== parsed.intent.quoteId) {
+    throw new Error("Intent declaration quote id is invalid");
+  }
+  return SignedHyperEvmExecutionIntentSchema.parse({
+    intent: parsed.intent,
+    paymentRequirementsHash: parsed.paymentRequirementsHash,
+    intentHash: parsed.intentHash,
+    signature: parsed.signature,
+    signer: parsed.signer,
+  });
 }

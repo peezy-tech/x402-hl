@@ -624,6 +624,14 @@ async function signTypedDataWithSigner(signer, typedData) {
 }
 
 // src/intents/extension.ts
+import { z as z2 } from "zod";
+var PaymentSignedExecutionIntentSchema = SignedHyperEvmExecutionIntentSchema.extend({
+  version: z2.literal(X402_HL_INTENT_VERSION).optional(),
+  required: z2.boolean().optional(),
+  mode: z2.literal("brokered").optional(),
+  intentTemplateHash: Bytes32Schema.optional(),
+  quoteId: z2.string().optional()
+}).strict();
 function createIntentDeclaration(input, options = {}) {
   const intent = normalizeExecutionIntent(input);
   return IntentDeclarationSchema.parse({
@@ -658,9 +666,22 @@ function attachSignedExecutionIntent(paymentPayload, signedIntent) {
   };
 }
 function readSignedExecutionIntent(paymentPayload) {
-  const signedIntent = paymentPayload.extensions?.[X402_HL_INTENTS_EXTENSION];
-  if (signedIntent == null) return void 0;
-  return SignedHyperEvmExecutionIntentSchema.parse(signedIntent);
+  const extension = paymentPayload.extensions?.[X402_HL_INTENTS_EXTENSION];
+  if (extension == null) return void 0;
+  const parsed = PaymentSignedExecutionIntentSchema.parse(extension);
+  if (parsed.intentTemplateHash != null && parsed.intentTemplateHash.toLowerCase() !== hashExecutionIntentTemplate(parsed.intent).toLowerCase()) {
+    throw new Error("Intent declaration template hash is invalid");
+  }
+  if (parsed.quoteId != null && parsed.quoteId !== parsed.intent.quoteId) {
+    throw new Error("Intent declaration quote id is invalid");
+  }
+  return SignedHyperEvmExecutionIntentSchema.parse({
+    intent: parsed.intent,
+    paymentRequirementsHash: parsed.paymentRequirementsHash,
+    intentHash: parsed.intentHash,
+    signature: parsed.signature,
+    signer: parsed.signer
+  });
 }
 
 // src/intents/client/index.ts

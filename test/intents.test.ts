@@ -928,6 +928,22 @@ test("verification rejects payment requirements and intent hash mismatches", asy
 test("malformed intent extension returns a typed failure", async t => {
   const fixture = await makeFixture();
 
+  await t.test("known x402 client declaration echoes are accepted", async () => {
+    const result = await verifyPaidExecutionIntent({
+      ...verificationInput(fixture),
+      paymentPayload: {
+        ...fixture.paymentPayload,
+        extensions: {
+          [X402_HL_INTENTS_EXTENSION]: {
+            ...fixture.quote.declaration,
+            ...fixture.signedIntent,
+          },
+        },
+      },
+    });
+    assert.equal(result.ok, true);
+  });
+
   await t.test("missing required fields", async () => {
     const result = await verifyPaidExecutionIntent({
       ...verificationInput(fixture),
@@ -953,6 +969,23 @@ test("malformed intent extension returns a typed failure", async t => {
           [X402_HL_INTENTS_EXTENSION]: {
             ...fixture.signedIntent,
             uncommittedPolicy: true,
+          },
+        },
+      },
+    });
+    assertFailure(result, "malformed_extension_payload");
+  });
+
+  await t.test("mismatched declaration echo", async () => {
+    const result = await verifyPaidExecutionIntent({
+      ...verificationInput(fixture),
+      paymentPayload: {
+        ...fixture.paymentPayload,
+        extensions: {
+          [X402_HL_INTENTS_EXTENSION]: {
+            ...fixture.quote.declaration,
+            ...fixture.signedIntent,
+            quoteId: "different-quote",
           },
         },
       },

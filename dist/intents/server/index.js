@@ -617,6 +617,14 @@ async function signTypedDataWithSigner(signer, typedData) {
 }
 
 // src/intents/extension.ts
+import { z as z2 } from "zod";
+var PaymentSignedExecutionIntentSchema = SignedHyperEvmExecutionIntentSchema.extend({
+  version: z2.literal(X402_HL_INTENT_VERSION).optional(),
+  required: z2.boolean().optional(),
+  mode: z2.literal("brokered").optional(),
+  intentTemplateHash: Bytes32Schema.optional(),
+  quoteId: z2.string().optional()
+}).strict();
 function createIntentDeclaration(input, options = {}) {
   const intent = normalizeExecutionIntent(input);
   return IntentDeclarationSchema.parse({
@@ -651,9 +659,22 @@ function attachSignedExecutionIntent(paymentPayload, signedIntent) {
   };
 }
 function readSignedExecutionIntent(paymentPayload) {
-  const signedIntent = paymentPayload.extensions?.[X402_HL_INTENTS_EXTENSION];
-  if (signedIntent == null) return void 0;
-  return SignedHyperEvmExecutionIntentSchema.parse(signedIntent);
+  const extension = paymentPayload.extensions?.[X402_HL_INTENTS_EXTENSION];
+  if (extension == null) return void 0;
+  const parsed = PaymentSignedExecutionIntentSchema.parse(extension);
+  if (parsed.intentTemplateHash != null && parsed.intentTemplateHash.toLowerCase() !== hashExecutionIntentTemplate(parsed.intent).toLowerCase()) {
+    throw new Error("Intent declaration template hash is invalid");
+  }
+  if (parsed.quoteId != null && parsed.quoteId !== parsed.intent.quoteId) {
+    throw new Error("Intent declaration quote id is invalid");
+  }
+  return SignedHyperEvmExecutionIntentSchema.parse({
+    intent: parsed.intent,
+    paymentRequirementsHash: parsed.paymentRequirementsHash,
+    intentHash: parsed.intentHash,
+    signature: parsed.signature,
+    signer: parsed.signer
+  });
 }
 
 // src/intents/server/quote.ts
@@ -706,32 +727,32 @@ import { SendAssetTypes } from "@nktkas/hyperliquid/api/exchange";
 import { getAddress as getAddress4, recoverTypedDataAddress as recoverTypedDataAddress2 } from "viem";
 
 // src/types.ts
-import { z as z2 } from "zod";
+import { z as z3 } from "zod";
 var HyperliquidTokenIdRegex = /^[^:]+:0x[0-9a-fA-F]{32,40}$/;
 var Bytes32Regex2 = /^0x[0-9a-fA-F]{64}$/;
 var EvmAddressRegex2 = /^0x[0-9a-fA-F]{40}$/;
 var HexIntegerRegex = /^0x[0-9a-fA-F]+$/;
 var DecimalAmountRegex = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
-var ExactHyperliquidPayloadSchema = z2.object({
-  action: z2.object({
-    type: z2.literal("sendAsset"),
-    signatureChainId: z2.string().regex(HexIntegerRegex),
-    hyperliquidChain: z2.enum(["Mainnet", "Testnet"]),
-    destination: z2.string().regex(EvmAddressRegex2),
-    sourceDex: z2.literal("spot"),
-    destinationDex: z2.literal("spot"),
-    token: z2.string().regex(HyperliquidTokenIdRegex),
-    amount: z2.string().regex(DecimalAmountRegex),
-    fromSubAccount: z2.literal(""),
-    nonce: z2.number().int().nonnegative().safe()
+var ExactHyperliquidPayloadSchema = z3.object({
+  action: z3.object({
+    type: z3.literal("sendAsset"),
+    signatureChainId: z3.string().regex(HexIntegerRegex),
+    hyperliquidChain: z3.enum(["Mainnet", "Testnet"]),
+    destination: z3.string().regex(EvmAddressRegex2),
+    sourceDex: z3.literal("spot"),
+    destinationDex: z3.literal("spot"),
+    token: z3.string().regex(HyperliquidTokenIdRegex),
+    amount: z3.string().regex(DecimalAmountRegex),
+    fromSubAccount: z3.literal(""),
+    nonce: z3.number().int().nonnegative().safe()
   }).strict(),
-  signature: z2.object({
-    r: z2.string().regex(Bytes32Regex2),
-    s: z2.string().regex(Bytes32Regex2),
-    v: z2.union([z2.literal(27), z2.literal(28)])
+  signature: z3.object({
+    r: z3.string().regex(Bytes32Regex2),
+    s: z3.string().regex(Bytes32Regex2),
+    v: z3.union([z3.literal(27), z3.literal(28)])
   }).strict(),
-  nonce: z2.number().int().nonnegative().safe(),
-  user: z2.string().regex(EvmAddressRegex2)
+  nonce: z3.number().int().nonnegative().safe(),
+  user: z3.string().regex(EvmAddressRegex2)
 }).strict();
 
 // src/intents/server/verification.ts
@@ -762,7 +783,7 @@ async function verifyPreSettlementExecutionIntent(input) {
   }
   let signedIntent;
   try {
-    signedIntent = SignedHyperEvmExecutionIntentSchema.parse(rawSignedIntent);
+    signedIntent = readSignedExecutionIntent(input.paymentPayload);
   } catch {
     return failure(
       "malformed_extension_payload",
