@@ -781,6 +781,35 @@ test("verification rejects an expired intent", async () => {
   assertFailure(result, "execution_intent_expired");
 });
 
+test("paid verification accepts a payment that expired during settlement", async () => {
+  const fixture = await makeFixture();
+  const expiredNonce =
+    Date.now() - (fixture.paymentRequirements.maxTimeoutSeconds + 1) * 1000;
+  const paymentPayload = await resignPaymentPayload(
+    fixture.paymentPayload,
+    exact => {
+      exact.action.nonce = expiredNonce;
+      exact.nonce = expiredNonce;
+    },
+  );
+
+  const preSettlement = await verifyPreSettlementExecutionIntent({
+    ...preSettlementInput(fixture),
+    paymentPayload,
+  });
+  assert.equal(preSettlement.ok, false);
+  if (preSettlement.ok) assert.fail("expected expired payment to be rejected");
+  assert.equal(preSettlement.reason, "payment_payload_requirements_mismatch");
+
+  const paid = await verifyPaidExecutionIntent({
+    ...verificationInput(fixture),
+    paymentPayload,
+  });
+  if (!paid.ok) assert.fail(`${paid.reason}: ${paid.message}`);
+  assert.equal(paid.payer, account.address);
+  assert.equal(paid.paymentPayer, account.address);
+});
+
 test("pre-settlement verification accepts a valid intent without settlement", async () => {
   const fixture = await makeFixture();
   const result = await verifyPreSettlementExecutionIntent(
@@ -2350,11 +2379,20 @@ test("an intent that expires during simulation is refunded without execution", a
   assert.equal(refundCalls, 1);
 });
 
-test("a payment settled after the deadline is durably registered and refunded", async () => {
+test("a payment and intent that expire during settlement are registered and refunded", async () => {
   const start = 1_800_000_000;
   let executionCalls = 0;
   let refundCalls = 0;
   const fixture = await makeFixture({ deadline: start });
+  const expiredNonce =
+    Date.now() - (fixture.paymentRequirements.maxTimeoutSeconds + 1) * 1000;
+  const paymentPayload = await resignPaymentPayload(
+    fixture.paymentPayload,
+    exact => {
+      exact.action.nonce = expiredNonce;
+      exact.nonce = expiredNonce;
+    },
+  );
   const store = new InMemoryIntentExecutionStore();
   const executor = createIntentExecutor(
     executorConfig(store, {
@@ -2382,12 +2420,14 @@ test("a payment settled after the deadline is durably registered and refunded", 
 
   const strict = await executor.verify({
     ...executionInput(fixture),
+    paymentPayload,
     now: start + 10,
   });
   assertFailure(strict, "execution_intent_expired");
 
   const receipt = await executor.execute({
     ...executionInput(fixture),
+    paymentPayload,
     now: start + 10,
   });
   assert.equal(receipt.status, "refunded");

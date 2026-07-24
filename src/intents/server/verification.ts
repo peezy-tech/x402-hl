@@ -88,6 +88,13 @@ export type PaidIntentVerificationResult =
 export async function verifyPreSettlementExecutionIntent(
   input: PreSettlementIntentVerificationInput,
 ): Promise<PreSettlementIntentVerificationResult> {
+  return verifyExecutionIntent(input, { allowExpiredPayment: false });
+}
+
+async function verifyExecutionIntent(
+  input: PreSettlementIntentVerificationInput,
+  options: { allowExpiredPayment: boolean },
+): Promise<PreSettlementIntentVerificationResult> {
   let paymentRequirementsHash: Hex;
   let acceptedHash: Hex;
   try {
@@ -259,7 +266,7 @@ export async function verifyPreSettlementExecutionIntent(
   const paymentVerification = await verifyExactHyperliquidPayment(
     input.paymentPayload,
     input.paymentRequirements,
-    { allowExpired: false },
+    { allowExpired: options.allowExpiredPayment },
   );
   if (!paymentVerification.isValid) {
     if (
@@ -326,7 +333,12 @@ export async function verifyPaidExecutionIntent(
     );
   }
 
-  const verified = await verifyPreSettlementExecutionIntent(input);
+  // A successful settlement can arrive after the signed payment TTL lapses.
+  // Re-run every binding and signature check, but do not orphan confirmed funds
+  // solely because settlement or reconciliation crossed that TTL.
+  const verified = await verifyExecutionIntent(input, {
+    allowExpiredPayment: true,
+  });
   if (!verified.ok) return verified;
 
   if (payer !== verified.paymentPayer) {
