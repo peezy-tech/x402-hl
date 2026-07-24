@@ -32,11 +32,11 @@ Run from `x402-hl/` with the supported Node and pnpm versions:
 ```sh
 pnpm install --frozen-lockfile
 pnpm test
+pnpm build
 pnpm typecheck
 pnpm example:express:typecheck
 pnpm compat:all
 pnpm docs:check
-pnpm build
 pnpm docs:build
 pnpm pack:audit
 ```

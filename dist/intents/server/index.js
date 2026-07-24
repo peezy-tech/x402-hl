@@ -624,9 +624,12 @@ function readSignedExecutionIntent(paymentPayload) {
 
 // src/intents/server/quote.ts
 function createIntentQuote(input) {
+  if (input.intent.quoteId !== void 0 && input.intent.quoteId !== input.id) {
+    throw new Error("Intent quoteId must match the quote id");
+  }
   const intent = normalizeExecutionIntent({
     ...input.intent,
-    quoteId: input.intent.quoteId ?? input.id
+    quoteId: input.id
   });
   const declaration = createIntentDeclaration(intent);
   const paymentExtra = createIntentPaymentExtra(

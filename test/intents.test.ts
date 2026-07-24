@@ -213,6 +213,37 @@ async function mutatePaymentBinding(
   };
 }
 
+test("createIntentQuote rejects contradictory quote IDs", () => {
+  const input = {
+    id: "quote-authoritative",
+    network: "hyperliquid:testnet" as const,
+    price: "$0.01",
+    payTo: PAY_TO,
+    intent: baseIntent({ quoteId: undefined }) as never,
+  };
+
+  const quote = createIntentQuote(input);
+  assert.equal(quote.id, input.id);
+  assert.equal(quote.intent.quoteId, input.id);
+  assert.equal(quote.declaration.quoteId, input.id);
+  assert.equal(quote.paymentExtra.quoteId, input.id);
+
+  assert.doesNotThrow(() =>
+    createIntentQuote({
+      ...input,
+      intent: baseIntent({ quoteId: input.id }) as never,
+    }),
+  );
+  assert.throws(
+    () =>
+      createIntentQuote({
+        ...input,
+        intent: baseIntent({ quoteId: "quote-contradictory" }) as never,
+      }),
+    /quoteId must match/,
+  );
+});
+
 test("normalization, metadata, and typed-data hashes are deterministic", () => {
   const left = normalizeExecutionIntent(
     baseIntent({
