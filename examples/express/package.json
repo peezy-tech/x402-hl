@@ -12,10 +12,10 @@
     "pay": "tsx --env-file=.env scripts/pay-once.ts"
   },
   "dependencies": {
-    "@x402/core": "^2.14.0",
-    "@x402/express": "^2.14.0",
-    "@x402/fetch": "^2.14.0",
-    "@x402/paywall": "^2.14.0",
+    "@x402/core": "^2.19.0",
+    "@x402/express": "^2.19.0",
+    "@x402/fetch": "^2.19.0",
+    "@x402/paywall": "^2.19.0",
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
     "viem": "^2.39.3",

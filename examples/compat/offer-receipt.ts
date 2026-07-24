@@ -222,7 +222,7 @@ console.log(JSON.stringify({
   },
   packageGraph: {
     x402Hl: "local package import",
-    extensions: "@x402/extensions/offer-receipt@2.14.0",
+    extensions: "@x402/extensions/offer-receipt@2.19.0",
   },
 }, null, 2));
 

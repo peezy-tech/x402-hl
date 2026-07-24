@@ -1,6 +1,7 @@
 import { PaymentPayload, PaymentRequirements, SchemeNetworkClient } from "@x402/core/types";
-import { parser, SendAssetRequest, SendAssetTypes } from "@nktkas/hyperliquid/api/exchange";
+import { SendAssetRequest, SendAssetTypes } from "@nktkas/hyperliquid/api/exchange";
 import { signUserSignedAction } from "@nktkas/hyperliquid/signing";
+import { parse } from "valibot";
 import { toHex } from "viem";
 import { arbitrum } from "viem/chains";
 import { ClientHyperliquidSigner } from "../../signer";
@@ -23,7 +24,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkClient {
     const decimals = await this.resolveDecimals(paymentRequirements);
     const nonce = Date.now();
 
-    const request = parser(SendAssetRequest)({
+    const request = parse(SendAssetRequest, {
       action: {
         type: "sendAsset",
         signatureChainId: toHex(arbitrum.id),

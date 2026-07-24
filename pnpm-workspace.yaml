@@ -7,3 +7,6 @@ allowBuilds:
   esbuild: true
   keccak: true
   utf-8-validate: true
+
+minimumReleaseAgeExclude:
+  - viem@2.55.8

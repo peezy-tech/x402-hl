@@ -1,5 +1,6 @@
 import * as hl from "@nktkas/hyperliquid";
-import type { TokenDetailsResponse, TxDetailsResponse } from "@nktkas/hyperliquid/api/info";
+import type { TxDetailsResponse } from "@nktkas/hyperliquid/api/explorer";
+import type { TokenDetailsResponse } from "@nktkas/hyperliquid/api/info";
 import {
   HyperliquidNetwork,
   HyperliquidChainName,
@@ -34,9 +35,14 @@ export function createInfoClient(
 }
 
 export async function fetchTransactionDetails(
-  client: hl.InfoClient,
+  network: string,
   hash: TxDetailsResponse["tx"]["hash"],
 ): Promise<TxDetailsResponse["tx"]> {
+  assertHyperliquidNetwork(network);
+  const transport = new hl.HttpTransport({
+    isTestnet: network === HYPERLIQUID_TESTNET,
+  });
+  const client = new hl.ExplorerClient({ transport });
   const response = await client.txDetails({ hash });
   return response.tx;
 }

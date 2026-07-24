@@ -7,7 +7,7 @@ offline suite is not funded network evidence.
 
 - Start from a clean worktree and the exact commit intended for the tag.
 - Confirm the package version, changelog heading, release notes, and tag agree.
-  For this release they must resolve to `0.2.0` and `v0.2.0`.
+  For this release they must resolve to `0.2.1` and `v0.2.1`.
 - Review every public export and generated declaration for:
   - `x402-hl`;
   - `x402-hl/exact/client`, `/server`, and `/facilitator`;
@@ -31,6 +31,7 @@ Run from `x402-hl/` with the supported Node and pnpm versions:
 
 ```sh
 pnpm install --frozen-lockfile
+pnpm audit:prod
 pnpm test
 pnpm build
 pnpm typecheck
@@ -69,7 +70,7 @@ Create one candidate tarball and preserve its path:
 ```sh
 pack_dir="$(mktemp -d)"
 pnpm pack --pack-destination "$pack_dir"
-tarball="$pack_dir/x402-hl-0.2.0.tgz"
+tarball="$pack_dir/x402-hl-0.2.1.tgz"
 tar -tzf "$tarball" | sort
 ```
 
@@ -105,6 +106,7 @@ consumer_dir="$(mktemp -d)"
   cd "$consumer_dir"
   npm init -y
   npm install "$tarball"
+  npm audit --omit=dev --audit-level=high
   node --input-type=module -e '
     for (const name of [
       "x402-hl",
@@ -211,12 +213,12 @@ Create and push the tag only after every required gate passes.
 After the trusted-publishing job succeeds:
 
 ```sh
-npm view x402-hl@0.2.0 version dist-tags integrity shasum --json
+npm view x402-hl@0.2.1 version dist-tags integrity shasum --json
 ```
 
 Then:
 
-- install `x402-hl@0.2.0` into a fresh directory and repeat runtime/type import
+- install `x402-hl@0.2.1` into a fresh directory and repeat runtime/type import
   checks;
 - confirm npm provenance is present for the published artifact;
 - validate public docs at `https://peezy.tech/x402-hl/`;

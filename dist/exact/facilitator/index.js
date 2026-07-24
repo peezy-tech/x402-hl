@@ -1,7 +1,6 @@
 // src/exact/facilitator/scheme.ts
 import { SendAssetTypes } from "@nktkas/hyperliquid/api/exchange";
-import { recoverUserFromUserSigned } from "@nktkas/hyperliquid/utils";
-import { getAddress } from "viem";
+import { getAddress, recoverTypedDataAddress } from "viem";
 
 // src/types.ts
 import { z } from "zod";
@@ -83,7 +82,12 @@ function createInfoClient(network, options) {
   });
   return new hl.InfoClient({ transport });
 }
-async function fetchTransactionDetails(client, hash) {
+async function fetchTransactionDetails(network, hash) {
+  assertHyperliquidNetwork(network);
+  const transport = new hl.HttpTransport({
+    isTestnet: network === HYPERLIQUID_TESTNET
+  });
+  const client = new hl.ExplorerClient({ transport });
   const response = await client.txDetails({ hash });
   return response.tx;
 }
@@ -179,10 +183,21 @@ var ExactHyperliquidScheme = class {
     }
     let recoveredPayer;
     try {
-      recoveredPayer = await recoverUserFromUserSigned({
-        action,
+      recoveredPayer = await recoverTypedDataAddress({
+        domain: {
+          name: "HyperliquidSignTransaction",
+          version: "1",
+          chainId: Number.parseInt(action.signatureChainId),
+          verifyingContract: "0x0000000000000000000000000000000000000000"
+        },
         types: SendAssetTypes,
-        signature: exactPayload.signature
+        primaryType: "HyperliquidTransaction:SendAsset",
+        message: action,
+        signature: {
+          r: exactPayload.signature.r,
+          s: exactPayload.signature.s,
+          yParity: exactPayload.signature.v - 27
+        }
       });
     } catch {
       return {
@@ -354,10 +369,13 @@ var ExactHyperliquidScheme = class {
       return String(body).slice(0, 500);
     }
   }
-  async confirmTransaction(client, hash, payer, payload, requirements) {
+  async confirmTransaction(hash, payer, payload, requirements) {
     for (let i = 0; i < 3; i++) {
       try {
-        const tx = await fetchTransactionDetails(client, hash);
+        const tx = await fetchTransactionDetails(
+          requirements.network,
+          hash
+        );
         if (tx.error != null || tx.user.toLowerCase() !== payer.toLowerCase()) {
           return false;
         }
@@ -399,7 +417,6 @@ var ExactHyperliquidScheme = class {
         );
         for (const candidate of candidates) {
           if (/^0x[0-9a-fA-F]{64}$/.test(candidate.hash) && await this.confirmTransaction(
-            client,
             candidate.hash,
             payer,
             payload,
