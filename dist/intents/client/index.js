@@ -651,10 +651,6 @@ function isUserRejectedSigningError(error) {
 // src/intents/extension.ts
 import { z as z2 } from "zod";
 var PaymentSignedExecutionIntentSchema = SignedHyperEvmExecutionIntentSchema.extend({
-  // Preserve the raw intent until normalization has compared metadata before
-  // and after recursive schema parsing. Zod records otherwise drop an own
-  // `__proto__` key before that canonicality check can see it.
-  intent: z2.unknown(),
   version: z2.literal(X402_HL_INTENT_VERSION).optional(),
   required: z2.boolean().optional(),
   mode: z2.literal("brokered").optional(),
@@ -710,7 +706,7 @@ function readSignedExecutionIntent(paymentPayload) {
   }
   const parsed = PaymentSignedExecutionIntentSchema.parse(extension);
   const intent = normalizeExecutionIntent(
-    parsed.intent
+    extension.intent
   );
   if (parsed.intentTemplateHash != null && parsed.intentTemplateHash.toLowerCase() !== hashExecutionIntentTemplate(intent).toLowerCase()) {
     throw new Error("Intent declaration template hash is invalid");

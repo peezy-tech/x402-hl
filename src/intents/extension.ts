@@ -21,10 +21,6 @@ import {
 // reject every other unsigned envelope field.
 const PaymentSignedExecutionIntentSchema =
   SignedHyperEvmExecutionIntentSchema.extend({
-    // Preserve the raw intent until normalization has compared metadata before
-    // and after recursive schema parsing. Zod records otherwise drop an own
-    // `__proto__` key before that canonicality check can see it.
-    intent: z.unknown(),
     version: z.literal(X402_HL_INTENT_VERSION).optional(),
     required: z.boolean().optional(),
     mode: z.literal("brokered").optional(),
@@ -105,8 +101,11 @@ export function readSignedExecutionIntent(
   }
 
   const parsed = PaymentSignedExecutionIntentSchema.parse(extension);
+  // Validate the complete wire intent before normalization can supply
+  // construction defaults. Normalize the original object so Zod record parsing
+  // cannot hide an own `__proto__` metadata key from the canonicality check.
   const intent = normalizeExecutionIntent(
-    parsed.intent as HyperEvmExecutionIntentInput,
+    (extension as { intent: HyperEvmExecutionIntentInput }).intent,
   );
   if (
     parsed.intentTemplateHash != null &&

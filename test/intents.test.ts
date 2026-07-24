@@ -1376,6 +1376,40 @@ test("malformed intent extension returns a typed failure", async t => {
     assertFailure(result, "malformed_extension_payload");
   });
 
+  await t.test("omitted required signed intent fields are not reconstructed", async () => {
+    const requiredFields = [
+      "version",
+      "callData",
+      "value",
+      "recipient",
+      "refundAddress",
+      "maxGasCost",
+      "maxSlippageBps",
+      "quoteId",
+      "metadataHash",
+    ] as const;
+
+    for (const field of requiredFields) {
+      const paymentPayload = structuredClone(fixture.paymentPayload);
+      const extension = paymentPayload.extensions?.[
+        X402_HL_INTENTS_EXTENSION
+      ] as { intent: Record<string, unknown> };
+      delete extension.intent[field];
+
+      assert.throws(
+        () => readSignedExecutionIntent(paymentPayload),
+        `missing ${field}`,
+      );
+      const result = await verifyPreSettlementExecutionIntent({
+        ...preSettlementInput(fixture),
+        paymentPayload,
+      });
+      assert.equal(result.ok, false, `missing ${field}`);
+      if (result.ok) assert.fail(`expected missing ${field} to fail`);
+      assert.equal(result.reason, "malformed_extension_payload", field);
+    }
+  });
+
   await t.test("own __proto__ metadata is not stripped before verification", async () => {
     const metadata = { visible: 1 };
     const fixture = await makeFixture({ metadata });
