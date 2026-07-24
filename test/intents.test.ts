@@ -570,7 +570,7 @@ test("a bound signing adapter receives account-free typed data", async () => {
   assert.equal((await verifyExecutionIntentSignature(signed)).valid, true);
 });
 
-test("signing retries with account only after an account-not-found error", async () => {
+test("signing retries with account after an account-not-found error", async () => {
   const fixture = await makeFixture();
   let calls = 0;
   const signed = await signExecutionIntent(
@@ -595,6 +595,84 @@ test("signing retries with account only after an account-not-found error", async
 
   assert.equal(calls, 2);
   assert.equal((await verifyExecutionIntentSignature(signed)).valid, true);
+});
+
+test("a custom account-requiring signer retries after a generic error", async () => {
+  const fixture = await makeFixture();
+  let calls = 0;
+  const signed = await signExecutionIntent(
+    fixture.quote.intent,
+    {
+      account: account.address,
+      async signTypedData(parameters) {
+        calls += 1;
+        if (calls === 1) {
+          assert.equal("account" in parameters, false);
+          throw new Error("account is required");
+        }
+        assert.equal(parameters.account, account.address);
+        const { account: _account, ...typedData } = parameters;
+        return account.signTypedData(typedData);
+      },
+    },
+    { paymentRequirements: fixture.paymentRequirements },
+  );
+
+  assert.equal(calls, 2);
+  assert.equal((await verifyExecutionIntentSignature(signed)).valid, true);
+});
+
+test("a failed account-bearing fallback preserves its error", async () => {
+  const fixture = await makeFixture();
+  const fallbackError = new Error("signing service unavailable");
+  let calls = 0;
+
+  await assert.rejects(
+    signExecutionIntent(
+      fixture.quote.intent,
+      {
+        account: account.address,
+        async signTypedData(parameters) {
+          calls += 1;
+          if (calls === 1) {
+            assert.equal("account" in parameters, false);
+            throw new Error("account is required");
+          }
+          assert.equal(parameters.account, account.address);
+          throw fallbackError;
+        },
+      },
+      { paymentRequirements: fixture.paymentRequirements },
+    ),
+    error => error === fallbackError,
+  );
+  assert.equal(calls, 2);
+});
+
+test("a wrapped rejected signing request is not retried", async () => {
+  const fixture = await makeFixture();
+  const rejection = Object.assign(new Error("User rejected the request"), {
+    code: 4001,
+  });
+  const wrapped = new Error("wallet request failed", { cause: rejection });
+  let calls = 0;
+
+  await assert.rejects(
+    signExecutionIntent(
+      fixture.quote.intent,
+      {
+        account: account.address,
+        async signTypedData(parameters) {
+          calls += 1;
+          assert.equal("account" in parameters, false);
+          throw wrapped;
+        },
+      },
+      { paymentRequirements: fixture.paymentRequirements },
+    ),
+    error => error === wrapped,
+  );
+  assert.equal(calls, 1);
 });
 
 test("signing rejects mismatched declared and configured signer accounts", async () => {

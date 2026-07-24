@@ -6,12 +6,15 @@ import { privateKeyToAccount } from "viem/accounts";
 import {
   createOfflineChainAdapter,
   createProductionExecutor,
+  POSTGRES_INTENT_STORE_CANONICALIZATION_MIGRATION_DDL,
   POSTGRES_INTENT_STORE_DDL,
+  PostgresIntentExecutionStore,
   createTransferQuote,
   executeSettledIntent,
   signClientIntent,
   verifyIntentBeforeSettlement,
 } from "../examples/intents/production";
+import type { PostgresIntentDatabase } from "../examples/intents/production";
 import { ExactHyperliquidScheme as ExactHyperliquidClient } from "../src/exact/client/index";
 import { InMemoryIntentExecutionStore } from "../src/intents/server/index";
 
@@ -38,6 +41,55 @@ test("production Postgres quote uniqueness folds gateway address case", () => {
     POSTGRES_INTENT_STORE_DDL,
     /ON x402_intent_payment \(application, lower\(gateway\), quote_id\)\s+WHERE primary_payment;/,
   );
+});
+
+test("production Postgres transaction identities share one durable canonical form", async () => {
+  assert.match(
+    POSTGRES_INTENT_STORE_DDL,
+    /btrim\(value, U&'\\0009.*\\FEFF'\)/,
+  );
+  assert.match(
+    POSTGRES_INTENT_STORE_DDL,
+    /CREATE UNIQUE INDEX x402_intent_payment_tx_canonical[\s\S]*x402_canonical_transaction\(payment_transaction\)/,
+  );
+  assert.match(
+    POSTGRES_INTENT_STORE_CANONICALIZATION_MIGRATION_DDL,
+    /LOCK TABLE x402_intent_payment IN ACCESS EXCLUSIVE MODE;/,
+  );
+  assert.match(
+    POSTGRES_INTENT_STORE_CANONICALIZATION_MIGRATION_DDL,
+    /canonical payment transaction aliases require manual reconciliation/,
+  );
+  assert.match(
+    POSTGRES_INTENT_STORE_CANONICALIZATION_MIGRATION_DDL,
+    /record - 'paymentTransaction' - 'executionTransaction' - 'refundTransaction'/,
+  );
+
+  let lookupTransaction: string | undefined;
+  const database: PostgresIntentDatabase = {
+    async transaction<T>(): Promise<T> {
+      throw new Error("transaction not expected");
+    },
+    async findByIntentHash() {
+      return undefined;
+    },
+    async findByPayment(_paymentNetwork, paymentTransaction) {
+      lookupTransaction = paymentTransaction;
+      return undefined;
+    },
+  };
+  const store = new PostgresIntentExecutionStore(database);
+  const padding = [
+    0x0009, 0x000a, 0x000b, 0x000c, 0x000d, 0x0020, 0x00a0, 0x1680,
+    0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007,
+    0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
+    0xfeff,
+  ]
+    .map(codePoint => String.fromCodePoint(codePoint))
+    .join("");
+
+  await store.getPayment("hyperliquid:testnet", `${padding}0xABC${padding}`);
+  assert.equal(lookupTransaction, "0xabc");
 });
 
 async function productionFixture(paymentIdentifier: string) {

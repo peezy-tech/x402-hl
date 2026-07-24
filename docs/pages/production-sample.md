@@ -268,18 +268,39 @@ and the intent signer is relaxed.
 The store is the replay and concurrency boundary. Store every settled payment,
 not only one row per intent: one payment is the primary execution funding row,
 and later payments for the same signed intent are refund-only rows. A production
-table needs at least these keys and indexes (transaction identifiers should have
-surrounding whitespace removed and be canonicalized to lowercase on write):
+table needs one canonical transaction function shared by checks, lookups, conflict
+targets, and indexes. This example matches ECMAScript `trim()` and then folds ASCII
+case:
 
 ```sql
+CREATE FUNCTION x402_canonical_transaction(value text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+SET search_path = pg_catalog
+AS $function$
+  SELECT pg_catalog.translate(
+    pg_catalog.btrim(value, U&'\0009\000A\000B\000C\000D\0020\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000\FEFF'),
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+    'abcdefghijklmnopqrstuvwxyz'
+  )
+$function$;
+
 ALTER TABLE intent_payments
   ADD PRIMARY KEY (payment_network, payment_transaction),
   ADD CONSTRAINT payment_transaction_canonical
-    CHECK (payment_transaction = lower(btrim(payment_transaction))),
+    CHECK (payment_transaction = x402_canonical_transaction(payment_transaction)),
   ADD CONSTRAINT execution_transaction_canonical
-    CHECK (execution_transaction IS NULL OR execution_transaction = lower(btrim(execution_transaction))),
+    CHECK (execution_transaction IS NULL OR execution_transaction = x402_canonical_transaction(execution_transaction)),
   ADD CONSTRAINT refund_transaction_canonical
-    CHECK (refund_transaction IS NULL OR refund_transaction = lower(btrim(refund_transaction)));
+    CHECK (refund_transaction IS NULL OR refund_transaction = x402_canonical_transaction(refund_transaction));
+CREATE UNIQUE INDEX intents_payment_tx_uq
+  ON intent_payments (
+    payment_network,
+    x402_canonical_transaction(payment_transaction)
+  );
 CREATE UNIQUE INDEX intents_primary_intent_uq
   ON intent_payments (intent_hash)
   WHERE primary_payment;
@@ -287,12 +308,23 @@ CREATE UNIQUE INDEX intents_primary_quote_uq
   ON intent_payments (application, lower(gateway), quote_id)
   WHERE primary_payment;
 CREATE UNIQUE INDEX intents_execution_tx_uq
-  ON intent_payments (execution_network, execution_transaction)
+  ON intent_payments (
+    execution_network,
+    x402_canonical_transaction(execution_transaction)
+  )
   WHERE execution_transaction IS NOT NULL;
 CREATE UNIQUE INDEX intents_refund_tx_uq
-  ON intent_payments (refund_network, refund_transaction)
+  ON intent_payments (
+    refund_network,
+    x402_canonical_transaction(refund_transaction)
+  )
   WHERE refund_transaction IS NOT NULL;
 ```
+
+For an existing table, run the locked, collision-checking backfill represented by
+`POSTGRES_INTENT_STORE_CANONICALIZATION_MIGRATION_DDL` before deploying the new
+adapter. Never silently choose a winner when two legacy rows collapse to one
+canonical payment key.
 
 Adapt those rows to `IntentExecutionStore`:
 
@@ -303,7 +335,8 @@ import type {
   IntentExecutionTransition,
 } from "x402-hl/intents/server";
 
-const canonicalTransaction = (value: string) => value.trim().toLowerCase();
+const canonicalTransaction = (value: string) =>
+  value.trim().replace(/[A-Z]/g, character => character.toLowerCase());
 
 function canonicalTransition(input: IntentExecutionTransition) {
   return {
@@ -360,7 +393,7 @@ class PostgresIntentStore implements IntentExecutionStore {
     return loadPaymentRecord(
       this.db,
       paymentNetwork,
-      paymentTransaction.trim().toLowerCase(),
+      canonicalTransaction(paymentTransaction),
     );
   }
 

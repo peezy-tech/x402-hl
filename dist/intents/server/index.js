@@ -617,7 +617,7 @@ async function signTypedDataWithSigner(signer, typedData) {
   try {
     return await signer.signTypedData(typedData);
   } catch (error) {
-    if (!signer.account || typeof error !== "object" || error == null || !("name" in error) || error.name !== "AccountNotFoundError") {
+    if (!signer.account || isUserRejectedSigningError(error)) {
       throw error;
     }
   }
@@ -625,6 +625,20 @@ async function signTypedDataWithSigner(signer, typedData) {
     ...typedData,
     account: signer.account
   });
+}
+function isUserRejectedSigningError(error) {
+  const visited = /* @__PURE__ */ new Set();
+  let current = error;
+  while (typeof current === "object" && current != null) {
+    if (visited.has(current)) return false;
+    visited.add(current);
+    const candidate = current;
+    if (candidate.name === "UserRejectedRequestError" || candidate.code === 4001 || candidate.code === "ACTION_REJECTED") {
+      return true;
+    }
+    current = candidate.cause;
+  }
+  return false;
 }
 
 // src/intents/extension.ts
@@ -1269,7 +1283,7 @@ function failure(reason, message) {
 
 // src/intents/server/identifiers.ts
 function canonicalizeTransactionIdentifier(value) {
-  return value.trim().toLowerCase();
+  return value.trim().replace(/[A-Z]/g, (character) => character.toLowerCase());
 }
 
 // src/intents/server/store.ts

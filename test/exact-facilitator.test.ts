@@ -264,6 +264,40 @@ test("settlement cache distinguishes signed action chain IDs", async () => {
   assert.equal(reconciliationCalls, 2);
 });
 
+test("concurrent settlement coalesces equivalent signature chain ID encodings", async () => {
+  const original = await signedPaymentPayload();
+  const equivalent = structuredClone(original);
+  const action = equivalent.payload.action as { signatureChainId: string };
+  action.signatureChainId = `0x0${action.signatureChainId.slice(2)}`;
+
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as FacilitatorInternals;
+  const confirmedHash = `0x${"68".repeat(32)}`;
+  let reconciliationCalls = 0;
+  let submissionCalls = 0;
+  internals.findConfirmedTransaction = async (...args: unknown[]) => {
+    reconciliationCalls += 1;
+    const attempts = args[4] as number | undefined;
+    return attempts === undefined ? confirmedHash : undefined;
+  };
+  internals.submitToExchange = async () => {
+    submissionCalls += 1;
+    return { status: "ok" };
+  };
+
+  const [first, second] = await Promise.all([
+    facilitator.settle(original, requirements),
+    facilitator.settle(equivalent, requirements),
+  ]);
+
+  assert.equal(first.success, true);
+  assert.equal(first.transaction, confirmedHash);
+  assert.equal(second.success, true);
+  assert.equal(second.transaction, confirmedHash);
+  assert.equal(submissionCalls, 1);
+  assert.equal(reconciliationCalls, 2);
+});
+
 test("settle retried after the TTL lapsed still recovers an already-settled payment", async t => {
   const payload = await signedPaymentPayload();
   const facilitator = new ExactHyperliquidFacilitator();

@@ -130,13 +130,7 @@ async function signTypedDataWithSigner(
   try {
     return (await signer.signTypedData(typedData)) as Hex;
   } catch (error) {
-    if (
-      !signer.account ||
-      typeof error !== "object" ||
-      error == null ||
-      !("name" in error) ||
-      error.name !== "AccountNotFoundError"
-    ) {
+    if (!signer.account || isUserRejectedSigningError(error)) {
       throw error;
     }
   }
@@ -145,4 +139,30 @@ async function signTypedDataWithSigner(
     ...typedData,
     account: signer.account,
   })) as Hex;
+}
+
+function isUserRejectedSigningError(error: unknown): boolean {
+  const visited = new Set<object>();
+  let current = error;
+
+  while (typeof current === "object" && current != null) {
+    if (visited.has(current)) return false;
+    visited.add(current);
+
+    const candidate = current as {
+      name?: unknown;
+      code?: unknown;
+      cause?: unknown;
+    };
+    if (
+      candidate.name === "UserRejectedRequestError" ||
+      candidate.code === 4001 ||
+      candidate.code === "ACTION_REJECTED"
+    ) {
+      return true;
+    }
+    current = candidate.cause;
+  }
+
+  return false;
 }

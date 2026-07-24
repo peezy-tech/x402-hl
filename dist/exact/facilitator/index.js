@@ -590,7 +590,7 @@ var ExactHyperliquidScheme = class {
     const destination = typeof action.destination === "string" ? action.destination.toLowerCase() : "";
     const token = typeof action.token === "string" ? action.token.toLowerCase() : "";
     const amount = typeof action.amount === "string" ? action.amount : "";
-    const signatureChainId = typeof action.signatureChainId === "string" ? action.signatureChainId : "";
+    const signatureChainId = typeof action.signatureChainId === "string" ? String(Number.parseInt(action.signatureChainId)) : "";
     return [
       network,
       payload.user.toLowerCase(),
