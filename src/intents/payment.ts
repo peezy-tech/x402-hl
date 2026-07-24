@@ -1,3 +1,4 @@
+import { PaymentRequirementsV2Schema } from "@x402/core/schemas";
 import type { PaymentRequirements } from "@x402/core/types";
 import type { Hex } from "viem";
 import { getAddress, keccak256, toBytes } from "viem";
@@ -42,14 +43,15 @@ export type IntentBindingResult =
 export function canonicalizePaymentRequirements(
   requirements: PaymentRequirements,
 ): CanonicalPaymentRequirements {
+  const parsed = PaymentRequirementsV2Schema.parse(requirements);
   const canonical: CanonicalPaymentRequirements = {
-    scheme: requirements.scheme,
-    network: requirements.network,
-    asset: requirements.asset,
-    amount: requirements.amount,
-    payTo: requirements.payTo,
-    maxTimeoutSeconds: requirements.maxTimeoutSeconds,
-    extra: requirements.extra ?? {},
+    scheme: parsed.scheme,
+    network: parsed.network,
+    asset: parsed.asset,
+    amount: parsed.amount,
+    payTo: parsed.payTo,
+    maxTimeoutSeconds: parsed.maxTimeoutSeconds,
+    extra: parsed.extra ?? {},
   };
 
   // Validate JSON portability before signing.

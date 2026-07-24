@@ -82,13 +82,16 @@ function createInfoClient(network, options) {
   return new hl.InfoClient({ transport });
 }
 var tokenInfoCache = /* @__PURE__ */ new Map();
-async function fetchHyperliquidTokenInfo(network, tokenId) {
+async function fetchHyperliquidTokenInfo(network, tokenId, signal) {
   assertHyperliquidNetwork(network);
   const cacheKey = `${network}:${tokenId.toLowerCase()}`;
   const cached = tokenInfoCache.get(cacheKey);
   if (cached) return cached;
   const client = createInfoClient(network);
-  const response = await client.tokenDetails({ tokenId });
+  const response = await client.tokenDetails(
+    { tokenId },
+    signal
+  );
   const info = {
     decimals: response.weiDecimals,
     symbol: response.name,

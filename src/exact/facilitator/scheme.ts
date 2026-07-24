@@ -68,13 +68,13 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     payload: PaymentPayload,
     requirements: PaymentRequirements,
   ): Promise<VerifyResponse> {
-    return this.verifyPayment(payload, requirements, { enforceTtl: true });
+    return this.verifyPayment(payload, requirements, { allowExpired: false });
   }
 
   private async verifyPayment(
     payload: PaymentPayload,
     requirements: PaymentRequirements,
-    options: { enforceTtl: boolean },
+    options: { allowExpired: boolean },
   ): Promise<VerifyResponse> {
     if (payload.x402Version !== 2) {
       return { isValid: false, invalidReason: "invalid_x402_version" };
@@ -125,16 +125,19 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
       return { isValid: false, invalidReason: "invalid_exact_hl_payload_asset_mismatch" };
     }
 
+    if (
+      !this.validateTtl(
+        action.nonce,
+        requirements.maxTimeoutSeconds,
+        options.allowExpired,
+      )
+    ) {
+      return { isValid: false, invalidReason: "payment_expired" };
+    }
+
     const decimals = await this.resolveDecimals(requirements);
     if (!this.validateAmount(amount, requirements.amount, decimals)) {
       return { isValid: false, invalidReason: "invalid_exact_hl_payload_amount_mismatch" };
-    }
-
-    if (
-      options.enforceTtl &&
-      !this.validateTtl(action.nonce, requirements.maxTimeoutSeconds)
-    ) {
-      return { isValid: false, invalidReason: "payment_expired" };
     }
 
     let recoveredPayer: string;
@@ -181,7 +184,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     // response), and rejecting it here would permanently report an
     // already-settled payment as payment_expired.
     const verification = await this.verifyPayment(payload, requirements, {
-      enforceTtl: false,
+      allowExpired: true,
     });
     if (!verification.isValid) {
       return {
@@ -220,11 +223,16 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     const pending = this.pendingSettlements.get(idempotencyKey);
     if (pending) return pending;
 
-    const ttlValid = this.validateTtl(
+    const expiredAtStart = !this.validateTtl(
       exactPayload.action.nonce,
       requirements.maxTimeoutSeconds,
     );
-    const settlement = this.settleVerified(exactPayload, requirements, payer, ttlValid)
+    const settlement = this.settleVerified(
+      exactPayload,
+      requirements,
+      payer,
+      expiredAtStart,
+    )
       .then(response => {
         if (response.success) {
           this.cacheSettlement(idempotencyKey, response);
@@ -243,7 +251,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     exactPayload: ExactHyperliquidPayload,
     requirements: PaymentRequirements,
     payer: string,
-    ttlValid: boolean,
+    expiredAtStart: boolean,
   ): Promise<SettleResponse> {
     const endpoint = getExchangeBaseUrl(requirements.network as any);
     const infoClient = createInfoClient(requirements.network as any);
@@ -261,7 +269,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
         payer,
         exactPayload,
         requirements,
-        ttlValid ? 1 : PRE_SUBMIT_RECONCILIATION_ATTEMPTS,
+        expiredAtStart ? PRE_SUBMIT_RECONCILIATION_ATTEMPTS : 1,
       );
       if (existingHash) {
         return {
@@ -288,9 +296,13 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
         };
       }
 
+      const confirmationDeadline =
+        Date.now() + POST_SUBMIT_CONFIRMATION_TIMEOUT_MS;
       let submissionFailed = false;
       try {
-        await this.submitToExchange(endpoint, exactPayload);
+        await this.runBeforeDeadline(confirmationDeadline, signal =>
+          this.submitToExchange(endpoint, exactPayload, signal),
+        );
       } catch {
         // Exchange errors and lost responses are ambiguous: the action may have
         // settled before the response failed or a restart replayed its nonce.
@@ -302,6 +314,8 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
         payer,
         exactPayload,
         requirements,
+        undefined,
+        confirmationDeadline,
       );
       if (matchedHash) {
         return {
@@ -336,10 +350,12 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
   private async submitToExchange(
     endpoint: string,
     payload: ExactHyperliquidPayload,
+    signal?: AbortSignal,
   ): Promise<HyperliquidExchangeResponse> {
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal,
       body: JSON.stringify({
         action: payload.action,
         signature: payload.signature,
@@ -375,24 +391,60 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     }
   }
 
+  private async runBeforeDeadline<T>(
+    deadline: number,
+    operation: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("confirmation deadline exceeded");
+
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error("confirmation deadline exceeded"));
+      }, remaining);
+    });
+
+    try {
+      return await Promise.race([operation(controller.signal), timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   private async confirmTransaction(
     hash: string,
     payer: string,
     payload: ExactHyperliquidPayload,
     requirements: PaymentRequirements,
+    deadline?: number,
   ): Promise<boolean> {
     for (let i = 0; i < 3; i++) {
+      if (deadline != null && Date.now() >= deadline) return false;
       try {
-        const tx = await fetchTransactionDetails(
-          requirements.network,
-          hash as `0x${string}`,
-        );
+        const tx = deadline == null
+          ? await fetchTransactionDetails(requirements.network, hash as `0x${string}`)
+          : await this.runBeforeDeadline(deadline, signal =>
+              fetchTransactionDetails(
+                requirements.network,
+                hash as `0x${string}`,
+                signal,
+              ),
+            );
+        if (deadline != null && Date.now() >= deadline) return false;
         if (tx.error != null || tx.user.toLowerCase() !== payer.toLowerCase()) {
           return false;
         }
         const action = tx.action as Record<string, unknown>;
         const expected = payload.action;
-        const decimals = await this.resolveDecimals(requirements);
+        const decimals = deadline == null
+          ? await this.resolveDecimals(requirements)
+          : await this.runBeforeDeadline(deadline, signal =>
+              this.resolveDecimals(requirements, signal),
+            );
+        if (deadline != null && Date.now() >= deadline) return false;
         return (
           action.type === "sendAsset" &&
           action.signatureChainId === expected.signatureChainId &&
@@ -406,7 +458,9 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
           action.nonce === expected.nonce
         );
       } catch {}
-      await new Promise(r => setTimeout(r, 250));
+      const remaining = deadline == null ? 250 : deadline - Date.now();
+      if (remaining <= 0) return false;
+      await new Promise(r => setTimeout(r, Math.min(250, remaining)));
     }
     return false;
   }
@@ -417,6 +471,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     payload: ExactHyperliquidPayload,
     requirements: PaymentRequirements,
     attempts?: number,
+    confirmationDeadline?: number,
   ): Promise<string | undefined> {
     const action = payload.action as Record<string, unknown>;
     const destination = typeof action.destination === "string" ? action.destination : undefined;
@@ -424,12 +479,21 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     const amount = typeof action.amount === "string" ? action.amount : undefined;
     if (!destination || !token || !amount) return undefined;
 
-    const decimals = await this.resolveDecimals(requirements);
-    const startTime = Math.max(0, payload.nonce - MATCH_LOOKBACK_MS);
     const deadline =
       attempts === undefined
-        ? Date.now() + POST_SUBMIT_CONFIRMATION_TIMEOUT_MS
+        ? confirmationDeadline ?? Date.now() + POST_SUBMIT_CONFIRMATION_TIMEOUT_MS
         : undefined;
+    let decimals: number | undefined;
+    try {
+      decimals = deadline == null
+        ? await this.resolveDecimals(requirements)
+        : await this.runBeforeDeadline(deadline, signal =>
+            this.resolveDecimals(requirements, signal),
+          );
+    } catch {
+      return undefined;
+    }
+    const startTime = Math.max(0, payload.nonce - MATCH_LOOKBACK_MS);
     let attempt = 0;
 
     while (
@@ -439,11 +503,17 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     ) {
       attempt += 1;
       try {
-        const updates = await client.userNonFundingLedgerUpdates({
+        const updateParameters = {
           user: payer as `0x${string}`,
           startTime,
           endTime: Date.now() + MATCH_LOOKAHEAD_MS,
-        });
+        };
+        const updates = deadline == null
+          ? await client.userNonFundingLedgerUpdates(updateParameters)
+          : await this.runBeforeDeadline(deadline, signal =>
+              client.userNonFundingLedgerUpdates(updateParameters, signal),
+            );
+        if (deadline != null && Date.now() >= deadline) break;
         const candidates = updates.filter(update =>
           this.ledgerUpdateMatchesPayment(update, {
             payer,
@@ -463,6 +533,7 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
               payer,
               payload,
               requirements,
+              deadline,
             ))
           ) {
             return candidate.hash;
@@ -613,12 +684,15 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
       .replace(/\.$/, "");
   }
 
-  private async resolveDecimals(req: PaymentRequirements): Promise<number | undefined> {
+  private async resolveDecimals(
+    req: PaymentRequirements,
+    signal?: AbortSignal,
+  ): Promise<number | undefined> {
     if (typeof req.extra?.decimals === "number") return req.extra.decimals;
     const tokenId = this.extractTokenId(req.asset);
     if (!tokenId) return undefined;
     try {
-      const info = await fetchHyperliquidTokenInfo(req.network, tokenId);
+      const info = await fetchHyperliquidTokenInfo(req.network, tokenId, signal);
       return info.decimals;
     } catch {
       return undefined;
@@ -685,12 +759,16 @@ export class ExactHyperliquidScheme implements SchemeNetworkFacilitator {
     return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(normalizedFraction || "0");
   }
 
-  private validateTtl(actionTime: unknown, maxTimeoutSeconds: number): boolean {
+  private validateTtl(
+    actionTime: unknown,
+    maxTimeoutSeconds: number,
+    allowExpired = false,
+  ): boolean {
     if (typeof actionTime !== "number") return false;
     const now = Date.now();
     return (
       actionTime <= now + MAX_CLOCK_SKEW_MS &&
-      now <= actionTime + maxTimeoutSeconds * 1000
+      (allowExpired || now <= actionTime + maxTimeoutSeconds * 1000)
     );
   }
 

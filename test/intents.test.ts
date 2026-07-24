@@ -9,6 +9,7 @@ import type {
 import type { Hex } from "viem";
 import { keccak256, stringToBytes } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { ExactHyperliquidScheme as ExactHyperliquidClient } from "../src/exact/client/index";
 import {
   createIntentDeclaration,
   createIntentPaymentExtra,
@@ -131,10 +132,12 @@ async function makeFixture(intentOverrides: Record<string, unknown> = {}) {
   const signedIntent = await signExecutionIntent(quote.intent, account, {
     paymentRequirements,
   });
+  const createdPayment = await new ExactHyperliquidClient(
+    account,
+  ).createPaymentPayload(2, paymentRequirements);
   const paymentPayload: PaymentPayload = {
-    x402Version: 2,
+    ...createdPayment,
     accepted: structuredClone(paymentRequirements),
-    payload: { user: account.address },
     extensions: {
       [X402_HL_INTENTS_EXTENSION]: signedIntent,
     },
@@ -487,6 +490,28 @@ test("a rejected signing request is not retried", async () => {
   assert.equal(calls, 1);
 });
 
+test("signing rejects mismatched declared and configured signer accounts", async () => {
+  const fixture = await makeFixture();
+  let calls = 0;
+
+  await assert.rejects(
+    signExecutionIntent(
+      fixture.quote.intent,
+      {
+        address: account.address,
+        account: otherAccount,
+        async signTypedData() {
+          calls += 1;
+          return HASH_A;
+        },
+      },
+      { paymentRequirements: fixture.paymentRequirements },
+    ),
+    /address must match the configured signing account/,
+  );
+  assert.equal(calls, 0);
+});
+
 test("a valid signed intent recovers its signer and verifies", async () => {
   const fixture = await makeFixture();
   assert.equal(
@@ -666,6 +691,33 @@ test("pre-settlement verification rejects unpayable intents before funds move", 
       paymentRequirements,
     });
     expectFailure(result, "payment_payload_requirements_mismatch");
+  });
+
+  await t.test("runtime-invalid payment requirements", async () => {
+    const paymentRequirements = structuredClone(
+      fixture.paymentRequirements,
+    ) as unknown as { amount: unknown };
+    paymentRequirements.amount = 1000000;
+    const result = await verifyPreSettlementExecutionIntent({
+      ...preSettlementInput(fixture),
+      paymentRequirements: paymentRequirements as PaymentRequirements,
+    });
+    expectFailure(result, "malformed_extension_payload");
+  });
+
+  await t.test("payment payer differs from intent signer", async () => {
+    const createdPayment = await new ExactHyperliquidClient(
+      otherAccount,
+    ).createPaymentPayload(2, fixture.paymentRequirements);
+    const result = await verifyPreSettlementExecutionIntent({
+      ...preSettlementInput(fixture),
+      paymentPayload: {
+        ...createdPayment,
+        accepted: structuredClone(fixture.paymentRequirements),
+        extensions: fixture.paymentPayload.extensions,
+      },
+    });
+    expectFailure(result, "execution_intent_payer_mismatch");
   });
 
   await t.test("a NaN verification clock fails closed", async () => {
@@ -1721,6 +1773,161 @@ test("policy and simulation constraints fail before destination execution", asyn
       assert.equal(refundCalls, 1);
     });
   }
+});
+
+test("adapter discriminants require runtime booleans", async t => {
+  await t.test("policy allowed string false is denied", async () => {
+    const fixture = await makeFixture();
+    let executionCalls = 0;
+    const executor = createIntentExecutor(
+      executorConfig(new InMemoryIntentExecutionStore(), {
+        policy: context =>
+          ({ ...exactPolicy(context), allowed: "false" }) as unknown as IntentPolicyDecision,
+        execute: async () => {
+          executionCalls += 1;
+          return {
+            success: true,
+            confirmed: true,
+            transaction: EXECUTION_TX,
+            network: "eip155:998",
+          };
+        },
+      }),
+    );
+
+    const receipt = await executor.execute(executionInput(fixture));
+    assert.equal(receipt.status, "refunded");
+    assert.equal(receipt.failure, undefined);
+    assert.equal(executionCalls, 0);
+  });
+
+  await t.test("simulation success string false is rejected", async () => {
+    const fixture = await makeFixture();
+    let executionCalls = 0;
+    const executor = createIntentExecutor(
+      executorConfig(new InMemoryIntentExecutionStore(), {
+        simulate: context =>
+          ({
+            ...exactSimulation(context),
+            success: "false",
+          }) as unknown as IntentSimulationResult,
+        execute: async () => {
+          executionCalls += 1;
+          return {
+            success: true,
+            confirmed: true,
+            transaction: EXECUTION_TX,
+            network: "eip155:998",
+          };
+        },
+      }),
+    );
+
+    const receipt = await executor.execute(executionInput(fixture));
+    assert.equal(receipt.status, "refunded");
+    assert.equal(executionCalls, 0);
+  });
+
+  for (const executionResult of [
+    {
+      success: "false",
+      confirmed: true,
+      transaction: EXECUTION_TX,
+      network: "eip155:998",
+    },
+    null,
+  ]) {
+    await t.test(
+      `execution result ${executionResult == null ? "null" : "string false"} is uncertain`,
+      async () => {
+        const fixture = await makeFixture();
+        let refundCalls = 0;
+        const executor = createIntentExecutor(
+          executorConfig(new InMemoryIntentExecutionStore(), {
+            execute: async () => executionResult as unknown as IntentExecutionResult,
+            refund: async () => {
+              refundCalls += 1;
+              return {
+                success: true,
+                confirmed: true,
+                transaction: REFUND_TX,
+                network: "hyperliquid:testnet",
+              };
+            },
+          }),
+        );
+
+        const receipt = await executor.execute(executionInput(fixture));
+        assert.equal(receipt.status, "manual_intervention");
+        assert.equal(receipt.failure?.reason, "execution_uncertain");
+        assert.equal(refundCalls, 0);
+      },
+    );
+  }
+
+  for (const refundResult of [
+    {
+      success: "false",
+      confirmed: true,
+      transaction: REFUND_TX,
+      network: "hyperliquid:testnet",
+    },
+    null,
+  ]) {
+    await t.test(
+      `refund result ${refundResult == null ? "null" : "string false"} is uncertain`,
+      async () => {
+        const fixture = await makeFixture();
+        const executor = createIntentExecutor(
+          executorConfig(new InMemoryIntentExecutionStore(), {
+            execute: async () => ({ success: false, refundSafe: true }),
+            refund: async () => refundResult as never,
+          }),
+        );
+
+        const receipt = await executor.execute(executionInput(fixture));
+        assert.equal(receipt.status, "manual_intervention");
+        assert.equal(receipt.failure?.reason, "refund_uncertain");
+      },
+    );
+  }
+
+  await t.test("null execution uncertainty flag is invalid", async () => {
+    const fixture = await makeFixture();
+    const executor = createIntentExecutor(
+      executorConfig(new InMemoryIntentExecutionStore(), {
+        execute: async () =>
+          ({
+            success: false,
+            refundSafe: true,
+            mayHaveSucceeded: null,
+          }) as unknown as IntentExecutionResult,
+      }),
+    );
+
+    const receipt = await executor.execute(executionInput(fixture));
+    assert.equal(receipt.status, "manual_intervention");
+    assert.equal(receipt.failure?.reason, "execution_uncertain");
+  });
+
+  await t.test("null refund uncertainty flag is invalid", async () => {
+    const fixture = await makeFixture();
+    const executor = createIntentExecutor(
+      executorConfig(new InMemoryIntentExecutionStore(), {
+        execute: async () => ({ success: false, refundSafe: true }),
+        refund: async () =>
+          ({
+            success: false,
+            retryable: true,
+            mayHaveSucceeded: null,
+          }) as never,
+      }),
+    );
+
+    const receipt = await executor.execute(executionInput(fixture));
+    assert.equal(receipt.status, "manual_intervention");
+    assert.equal(receipt.failure?.reason, "refund_uncertain");
+  });
 });
 
 test("an intent that expires during simulation is refunded without execution", async () => {

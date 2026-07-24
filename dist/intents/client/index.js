@@ -225,6 +225,7 @@ function isTerminalIntentExecutionStatus(status) {
 import { getAddress as getAddress3, recoverTypedDataAddress } from "viem";
 
 // src/intents/payment.ts
+import { PaymentRequirementsV2Schema } from "@x402/core/schemas";
 import { getAddress as getAddress2, keccak256 as keccak2562, toBytes } from "viem";
 
 // src/intents/json.ts
@@ -399,14 +400,15 @@ function hashExecutionIntentTemplate(input) {
 
 // src/intents/payment.ts
 function canonicalizePaymentRequirements(requirements) {
+  const parsed = PaymentRequirementsV2Schema.parse(requirements);
   const canonical = {
-    scheme: requirements.scheme,
-    network: requirements.network,
-    asset: requirements.asset,
-    amount: requirements.amount,
-    payTo: requirements.payTo,
-    maxTimeoutSeconds: requirements.maxTimeoutSeconds,
-    extra: requirements.extra ?? {}
+    scheme: parsed.scheme,
+    network: parsed.network,
+    asset: parsed.asset,
+    amount: parsed.amount,
+    payTo: parsed.payTo,
+    maxTimeoutSeconds: parsed.maxTimeoutSeconds,
+    extra: parsed.extra ?? {}
   };
   stableJson(canonical);
   return canonical;
@@ -553,12 +555,20 @@ function bindingFailure(reason, message) {
 
 // src/intents/signature.ts
 function getIntentSignerAddress(signer) {
+  const explicitAddress = signer.address ? getAddress3(signer.address) : void 0;
   const account = signer.account;
-  const address = signer.address ?? (typeof account === "string" ? account : account?.address);
+  const accountValue = typeof account === "string" ? account : account?.address;
+  const accountAddress = accountValue ? getAddress3(accountValue) : void 0;
+  if (explicitAddress && accountAddress && explicitAddress !== accountAddress) {
+    throw new Error(
+      "Intent signer address must match the configured signing account"
+    );
+  }
+  const address = explicitAddress ?? accountAddress;
   if (!address) {
     throw new Error("Intent signer is missing an EVM address");
   }
-  return getAddress3(address);
+  return address;
 }
 async function signExecutionIntent(input, signer, options) {
   const signerAddress = getIntentSignerAddress(signer);

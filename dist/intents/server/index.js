@@ -389,16 +389,18 @@ function hashExecutionIntentTemplate(input) {
 }
 
 // src/intents/payment.ts
+import { PaymentRequirementsV2Schema } from "@x402/core/schemas";
 import { getAddress as getAddress2, keccak256 as keccak2562, toBytes } from "viem";
 function canonicalizePaymentRequirements(requirements) {
+  const parsed = PaymentRequirementsV2Schema.parse(requirements);
   const canonical = {
-    scheme: requirements.scheme,
-    network: requirements.network,
-    asset: requirements.asset,
-    amount: requirements.amount,
-    payTo: requirements.payTo,
-    maxTimeoutSeconds: requirements.maxTimeoutSeconds,
-    extra: requirements.extra ?? {}
+    scheme: parsed.scheme,
+    network: parsed.network,
+    asset: parsed.asset,
+    amount: parsed.amount,
+    payTo: parsed.payTo,
+    maxTimeoutSeconds: parsed.maxTimeoutSeconds,
+    extra: parsed.extra ?? {}
   };
   stableJson(canonical);
   return canonical;
@@ -546,12 +548,20 @@ function bindingFailure(reason, message) {
 // src/intents/signature.ts
 import { getAddress as getAddress3, recoverTypedDataAddress } from "viem";
 function getIntentSignerAddress(signer) {
+  const explicitAddress = signer.address ? getAddress3(signer.address) : void 0;
   const account = signer.account;
-  const address = signer.address ?? (typeof account === "string" ? account : account?.address);
+  const accountValue = typeof account === "string" ? account : account?.address;
+  const accountAddress = accountValue ? getAddress3(accountValue) : void 0;
+  if (explicitAddress && accountAddress && explicitAddress !== accountAddress) {
+    throw new Error(
+      "Intent signer address must match the configured signing account"
+    );
+  }
+  const address = explicitAddress ?? accountAddress;
   if (!address) {
     throw new Error("Intent signer is missing an EVM address");
   }
-  return getAddress3(address);
+  return address;
 }
 async function signExecutionIntent(input, signer, options) {
   const signerAddress = getIntentSignerAddress(signer);
@@ -692,7 +702,39 @@ function createIntentQuote(input) {
 }
 
 // src/intents/server/verification.ts
-import { getAddress as getAddress4 } from "viem";
+import { SendAssetTypes } from "@nktkas/hyperliquid/api/exchange";
+import { getAddress as getAddress4, recoverTypedDataAddress as recoverTypedDataAddress2 } from "viem";
+
+// src/types.ts
+import { z as z2 } from "zod";
+var HyperliquidTokenIdRegex = /^[^:]+:0x[0-9a-fA-F]{32,40}$/;
+var Bytes32Regex2 = /^0x[0-9a-fA-F]{64}$/;
+var EvmAddressRegex2 = /^0x[0-9a-fA-F]{40}$/;
+var HexIntegerRegex = /^0x[0-9a-fA-F]+$/;
+var DecimalAmountRegex = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
+var ExactHyperliquidPayloadSchema = z2.object({
+  action: z2.object({
+    type: z2.literal("sendAsset"),
+    signatureChainId: z2.string().regex(HexIntegerRegex),
+    hyperliquidChain: z2.enum(["Mainnet", "Testnet"]),
+    destination: z2.string().regex(EvmAddressRegex2),
+    sourceDex: z2.literal("spot"),
+    destinationDex: z2.literal("spot"),
+    token: z2.string().regex(HyperliquidTokenIdRegex),
+    amount: z2.string().regex(DecimalAmountRegex),
+    fromSubAccount: z2.literal(""),
+    nonce: z2.number().int().nonnegative().safe()
+  }).strict(),
+  signature: z2.object({
+    r: z2.string().regex(Bytes32Regex2),
+    s: z2.string().regex(Bytes32Regex2),
+    v: z2.union([z2.literal(27), z2.literal(28)])
+  }).strict(),
+  nonce: z2.number().int().nonnegative().safe(),
+  user: z2.string().regex(EvmAddressRegex2)
+}).strict();
+
+// src/intents/server/verification.ts
 async function verifyPreSettlementExecutionIntent(input) {
   let paymentRequirementsHash;
   let acceptedHash;
@@ -830,6 +872,43 @@ async function verifyPreSettlementExecutionIntent(input) {
       "invalid_execution_intent_signature",
       "Execution intent signature is invalid"
     );
+  }
+  if (input.requireSamePayer !== false) {
+    let paymentPayer;
+    try {
+      const parsedPayment = ExactHyperliquidPayloadSchema.parse(
+        input.paymentPayload.payload
+      );
+      const recoveredPayer = await recoverTypedDataAddress2({
+        domain: {
+          name: "HyperliquidSignTransaction",
+          version: "1",
+          chainId: Number.parseInt(parsedPayment.action.signatureChainId),
+          verifyingContract: "0x0000000000000000000000000000000000000000"
+        },
+        types: SendAssetTypes,
+        primaryType: "HyperliquidTransaction:SendAsset",
+        message: parsedPayment.action,
+        signature: {
+          r: parsedPayment.signature.r,
+          s: parsedPayment.signature.s,
+          yParity: parsedPayment.signature.v - 27
+        }
+      });
+      paymentPayer = getAddress4(recoveredPayer);
+      if (paymentPayer !== getAddress4(parsedPayment.user)) throw new Error();
+    } catch {
+      return failure(
+        "malformed_extension_payload",
+        "Hyperliquid payment payload does not contain a valid payer signature"
+      );
+    }
+    if (paymentPayer !== getAddress4(signature.signer)) {
+      return failure(
+        "execution_intent_payer_mismatch",
+        "Execution intent signer does not match the signed Hyperliquid payer"
+      );
+    }
   }
   return {
     ok: true,
@@ -1294,7 +1373,7 @@ function createIntentExecutor(config) {
           claimToken
         );
       }
-      if (!policy.allowed) {
+      if (!hasBooleanDiscriminator(policy, "allowed") || policy.allowed === false) {
         return failAndRefund(
           config,
           record,
@@ -1324,7 +1403,7 @@ function createIntentExecutor(config) {
         simulation = { success: false };
       }
       const simulationFailure = verifySimulation(record, simulation);
-      if (simulationFailure || !simulation.success) {
+      if (simulationFailure || !hasBooleanDiscriminator(simulation, "success") || simulation.success === false) {
         return failAndRefund(
           config,
           record,
@@ -1387,8 +1466,23 @@ function createIntentExecutor(config) {
           )
         );
       }
-      if (!execution.success) {
-        if (execution.mayHaveSucceeded || !execution.refundSafe) {
+      if (!hasBooleanDiscriminator(execution, "success")) {
+        return markManualIntervention(
+          config.store,
+          record,
+          executionClaimToken,
+          safeFailure(
+            "execution_uncertain",
+            "Execution adapter returned an invalid result after submission began",
+            false
+          )
+        );
+      }
+      if (execution.success === false) {
+        if (typeof execution.refundSafe !== "boolean" || Object.prototype.hasOwnProperty.call(
+          execution,
+          "mayHaveSucceeded"
+        ) && typeof execution.mayHaveSucceeded !== "boolean" || execution.mayHaveSucceeded === true || execution.refundSafe === false) {
           return markManualIntervention(
             config.store,
             record,
@@ -1676,6 +1770,9 @@ function executionContext(record) {
     idempotencyKey: record.intentHash
   };
 }
+function hasBooleanDiscriminator(value, key) {
+  return value != null && typeof value === "object" && typeof value[key] === "boolean";
+}
 function verifyPolicyBinding(record, policy) {
   const expectedSelector = record.intent.callData.length >= 10 ? record.intent.callData.slice(0, 10).toLowerCase() : "0x";
   try {
@@ -1690,7 +1787,7 @@ function verifyPolicyBinding(record, policy) {
   );
 }
 function verifySimulation(record, simulation) {
-  if (!simulation.success) {
+  if (!hasBooleanDiscriminator(simulation, "success") || simulation.success === false) {
     return safeFailure(
       "simulation_failed",
       "Destination execution simulation failed",
@@ -1815,7 +1912,19 @@ async function runRefund(config, input, createClaimToken) {
       )
     );
   }
-  if (refund.success) {
+  if (!hasBooleanDiscriminator(refund, "success")) {
+    return markManualIntervention(
+      config.store,
+      record,
+      refundClaimToken,
+      safeFailure(
+        "refund_uncertain",
+        "Refund adapter returned an invalid result after submission began",
+        false
+      )
+    );
+  }
+  if (refund.success === true) {
     if (refund.confirmed !== true || typeof refund.transaction !== "string" || !refund.transaction.trim() || typeof refund.network !== "string" || !refund.network.trim()) {
       return markManualIntervention(
         config.store,
@@ -1878,7 +1987,7 @@ async function runRefund(config, input, createClaimToken) {
       }
     );
   }
-  if (refund.mayHaveSucceeded) {
+  if (typeof refund.retryable !== "boolean" || Object.prototype.hasOwnProperty.call(refund, "mayHaveSucceeded") && typeof refund.mayHaveSucceeded !== "boolean" || refund.mayHaveSucceeded === true) {
     return markManualIntervention(
       config.store,
       record,

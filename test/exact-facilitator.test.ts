@@ -279,13 +279,42 @@ test("settle of an expired payment with no ledger match fails closed without sub
   assert.equal(submitted, false);
 });
 
+test("settle rejects a far-future nonce before ledger reconciliation", async () => {
+  const futureNonce = Date.now() + 60_000;
+  const payload = await resignPaymentPayload(
+    await signedPaymentPayload(),
+    action => {
+      action.nonce = futureNonce;
+    },
+  );
+  (payload.payload as { nonce: number }).nonce = futureNonce;
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as FacilitatorInternals;
+  let reconciliationCalls = 0;
+  let submissionCalls = 0;
+  internals.findConfirmedTransaction = async () => {
+    reconciliationCalls += 1;
+    return undefined;
+  };
+  internals.submitToExchange = async () => {
+    submissionCalls += 1;
+    return { status: "ok" };
+  };
+
+  const settled = await facilitator.settle(payload, requirements);
+  assert.equal(settled.success, false);
+  assert.equal(settled.errorReason, "payment_expired");
+  assert.equal(reconciliationCalls, 0);
+  assert.equal(submissionCalls, 0);
+});
+
 test("settle does not submit when TTL expires during pre-submit reconciliation", async () => {
   const payload = await signedPaymentPayload();
   const facilitator = new ExactHyperliquidFacilitator();
   const internals = facilitator as unknown as FacilitatorInternals;
   let ttlChecks = 0;
   let submitted = false;
-  internals.validateTtl = () => ++ttlChecks === 1;
+  internals.validateTtl = () => ++ttlChecks < 3;
   internals.findConfirmedTransaction = async () => undefined;
   internals.submitToExchange = async () => {
     submitted = true;
@@ -295,7 +324,7 @@ test("settle does not submit when TTL expires during pre-submit reconciliation",
   const settled = await facilitator.settle(payload, requirements);
   assert.equal(settled.success, false);
   assert.equal(settled.errorReason, "payment_expired");
-  assert.equal(ttlChecks, 2);
+  assert.equal(ttlChecks, 3);
   assert.equal(submitted, false);
 });
 
@@ -330,6 +359,123 @@ test("settle keeps an unreconciled submission error as hl_exchange_error", async
   const settled = await facilitator.settle(payload, requirements);
   assert.equal(settled.success, false);
   assert.equal(settled.errorReason, "hl_exchange_error");
+});
+
+test("submission and confirmation share one absolute timeout budget", async () => {
+  const payload = await signedPaymentPayload();
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as FacilitatorInternals & {
+    runBeforeDeadline<T>(
+      deadline: number,
+      operation: (signal: AbortSignal) => Promise<T>,
+    ): Promise<T>;
+  };
+  let submitDeadline: number | undefined;
+  let confirmationDeadline: number | undefined;
+  let reconciliationCalls = 0;
+  internals.runBeforeDeadline = async (deadline, operation) => {
+    submitDeadline = deadline;
+    return operation(new AbortController().signal);
+  };
+  internals.findConfirmedTransaction = async (...args: unknown[]) => {
+    reconciliationCalls += 1;
+    if (reconciliationCalls === 2) confirmationDeadline = args[5] as number;
+    return undefined;
+  };
+  internals.submitToExchange = async () => ({ status: "ok" });
+
+  const before = Date.now();
+  const settled = await facilitator.settle(payload, requirements);
+  const after = Date.now();
+
+  assert.equal(settled.success, false);
+  assert.equal(settled.errorReason, "hl_transfer_not_confirmed");
+  assert.equal(reconciliationCalls, 2);
+  assert.equal(confirmationDeadline, submitDeadline);
+  assert.ok(submitDeadline != null);
+  assert.ok(submitDeadline >= before + 30_000);
+  assert.ok(submitDeadline <= after + 30_000);
+});
+
+test("the timeout budget aborts a stalled exchange response body", async t => {
+  const payload = await signedPaymentPayload();
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as {
+    runBeforeDeadline<T>(
+      deadline: number,
+      operation: (signal: AbortSignal) => Promise<T>,
+    ): Promise<T>;
+    submitToExchange(
+      endpoint: string,
+      payload: unknown,
+      signal?: AbortSignal,
+    ): Promise<unknown>;
+  };
+  let requestSignal: AbortSignal | undefined;
+  t.mock.method(
+    globalThis,
+    "fetch",
+    (async (_input, init) => {
+      requestSignal = init?.signal ?? undefined;
+      return {
+        ok: true,
+        status: 200,
+        text: () => new Promise<string>(() => {}),
+      } as Response;
+    }) as typeof fetch,
+  );
+
+  const started = Date.now();
+  await assert.rejects(
+    internals.runBeforeDeadline(started + 50, signal =>
+      internals.submitToExchange(
+        "https://api.hyperliquid-testnet.xyz/exchange",
+        payload.payload,
+        signal,
+      ),
+    ),
+    /confirmation deadline exceeded/,
+  );
+  assert.equal(requestSignal?.aborted, true);
+  assert.ok(Date.now() - started < 1_000);
+});
+
+test("the timeout budget aborts an in-flight ledger lookup", async () => {
+  const payload = await signedPaymentPayload();
+  const facilitator = new ExactHyperliquidFacilitator();
+  const internals = facilitator as unknown as {
+    findConfirmedTransaction(
+      client: unknown,
+      payer: string,
+      payload: unknown,
+      requirements: PaymentRequirements,
+      attempts: undefined,
+      deadline: number,
+    ): Promise<string | undefined>;
+  };
+  let requestSignal: AbortSignal | undefined;
+  const client = {
+    userNonFundingLedgerUpdates(
+      _parameters: unknown,
+      signal?: AbortSignal,
+    ): Promise<never> {
+      requestSignal = signal;
+      return new Promise(() => {});
+    },
+  };
+
+  const started = Date.now();
+  const found = await internals.findConfirmedTransaction(
+    client,
+    account.address,
+    payload.payload,
+    requirements,
+    undefined,
+    started + 50,
+  );
+  assert.equal(found, undefined);
+  assert.equal(requestSignal?.aborted, true);
+  assert.ok(Date.now() - started < 1_000);
 });
 
 test("facilitator recognizes the public spotTransfer ledger candidate shape", () => {

@@ -1,10 +1,12 @@
+import { SendAssetTypes } from "@nktkas/hyperliquid/api/exchange";
 import type {
   PaymentPayload,
   PaymentRequirements,
   SettleResponse,
 } from "@x402/core/types";
 import type { Address, Hex } from "viem";
-import { getAddress } from "viem";
+import { getAddress, recoverTypedDataAddress } from "viem";
+import { ExactHyperliquidPayloadSchema } from "../../types";
 import {
   ExecutionIntentDomain,
   ExecutionIntentDomainSchema,
@@ -35,12 +37,13 @@ export interface PreSettlementIntentVerificationInput {
    * settlement latency into the refund state machine. Defaults to true.
    */
   enforceDeadline?: boolean;
+  /** Defaults to true and binds the signed intent to the Hyperliquid payer. */
+  requireSamePayer?: boolean;
 }
 
 export interface PaidIntentVerificationInput
   extends PreSettlementIntentVerificationInput {
   settleResponse?: SettleResponse;
-  requireSamePayer?: boolean;
 }
 
 export interface VerifiedPreSettlementExecutionIntent {
@@ -78,8 +81,9 @@ export type PaidIntentVerificationResult =
  * payment-requirements hash, domain, quote, template hash, payment binding,
  * deadline, and signature — so a resource server can reject an unpayable
  * intent before settling the HyperCore payment and burning the user's funds.
- * Settlement-dependent checks (settlement binding and payer/signer equality)
- * still require `verifyPaidExecutionIntent` after settlement.
+ * The intent signer is also bound to the payer declared by the independently
+ * signed Hyperliquid payment. Settlement receipt checks still require
+ * `verifyPaidExecutionIntent` after settlement.
  */
 export async function verifyPreSettlementExecutionIntent(
   input: PreSettlementIntentVerificationInput,
@@ -250,6 +254,44 @@ export async function verifyPreSettlementExecutionIntent(
       "invalid_execution_intent_signature",
       "Execution intent signature is invalid",
     );
+  }
+
+  if (input.requireSamePayer !== false) {
+    let paymentPayer: Address;
+    try {
+      const parsedPayment = ExactHyperliquidPayloadSchema.parse(
+        input.paymentPayload.payload,
+      );
+      const recoveredPayer = await recoverTypedDataAddress({
+        domain: {
+          name: "HyperliquidSignTransaction",
+          version: "1",
+          chainId: Number.parseInt(parsedPayment.action.signatureChainId),
+          verifyingContract: "0x0000000000000000000000000000000000000000",
+        },
+        types: SendAssetTypes,
+        primaryType: "HyperliquidTransaction:SendAsset",
+        message: parsedPayment.action,
+        signature: {
+          r: parsedPayment.signature.r as Hex,
+          s: parsedPayment.signature.s as Hex,
+          yParity: parsedPayment.signature.v - 27,
+        },
+      });
+      paymentPayer = getAddress(recoveredPayer);
+      if (paymentPayer !== getAddress(parsedPayment.user)) throw new Error();
+    } catch {
+      return failure(
+        "malformed_extension_payload",
+        "Hyperliquid payment payload does not contain a valid payer signature",
+      );
+    }
+    if (paymentPayer !== getAddress(signature.signer)) {
+      return failure(
+        "execution_intent_payer_mismatch",
+        "Execution intent signer does not match the signed Hyperliquid payer",
+      );
+    }
   }
 
   return {

@@ -37,13 +37,14 @@ export function createInfoClient(
 export async function fetchTransactionDetails(
   network: string,
   hash: TxDetailsResponse["tx"]["hash"],
+  signal?: AbortSignal,
 ): Promise<TxDetailsResponse["tx"]> {
   assertHyperliquidNetwork(network);
   const transport = new hl.HttpTransport({
     isTestnet: network === HYPERLIQUID_TESTNET,
   });
   const client = new hl.ExplorerClient({ transport });
-  const response = await client.txDetails({ hash });
+  const response = await client.txDetails({ hash }, signal);
   return response.tx;
 }
 
@@ -59,6 +60,7 @@ const tokenInfoCache = new Map<string, HyperliquidTokenInfo>();
 export async function fetchHyperliquidTokenInfo(
   network: string,
   tokenId: string,
+  signal?: AbortSignal,
 ): Promise<HyperliquidTokenInfo> {
   assertHyperliquidNetwork(network);
   const cacheKey = `${network}:${tokenId.toLowerCase()}`;
@@ -67,7 +69,10 @@ export async function fetchHyperliquidTokenInfo(
   if (cached) return cached;
 
   const client = createInfoClient(network);
-  const response: TokenDetailsResponse = await client.tokenDetails({ tokenId });
+  const response: TokenDetailsResponse = await client.tokenDetails(
+    { tokenId },
+    signal,
+  );
 
   const info: HyperliquidTokenInfo = {
     decimals: response.weiDecimals,

@@ -82,23 +82,26 @@ function createInfoClient(network, options) {
   });
   return new hl.InfoClient({ transport });
 }
-async function fetchTransactionDetails(network, hash) {
+async function fetchTransactionDetails(network, hash, signal) {
   assertHyperliquidNetwork(network);
   const transport = new hl.HttpTransport({
     isTestnet: network === HYPERLIQUID_TESTNET
   });
   const client = new hl.ExplorerClient({ transport });
-  const response = await client.txDetails({ hash });
+  const response = await client.txDetails({ hash }, signal);
   return response.tx;
 }
 var tokenInfoCache = /* @__PURE__ */ new Map();
-async function fetchHyperliquidTokenInfo(network, tokenId) {
+async function fetchHyperliquidTokenInfo(network, tokenId, signal) {
   assertHyperliquidNetwork(network);
   const cacheKey = `${network}:${tokenId.toLowerCase()}`;
   const cached = tokenInfoCache.get(cacheKey);
   if (cached) return cached;
   const client = createInfoClient(network);
-  const response = await client.tokenDetails({ tokenId });
+  const response = await client.tokenDetails(
+    { tokenId },
+    signal
+  );
   const info = {
     decimals: response.weiDecimals,
     symbol: response.name,
@@ -130,7 +133,7 @@ var ExactHyperliquidScheme = class {
     return [];
   }
   async verify(payload, requirements) {
-    return this.verifyPayment(payload, requirements, { enforceTtl: true });
+    return this.verifyPayment(payload, requirements, { allowExpired: false });
   }
   async verifyPayment(payload, requirements, options) {
     if (payload.x402Version !== 2) {
@@ -175,12 +178,16 @@ var ExactHyperliquidScheme = class {
     if (!this.tokenMatchesRequirements(token, requirements.asset)) {
       return { isValid: false, invalidReason: "invalid_exact_hl_payload_asset_mismatch" };
     }
+    if (!this.validateTtl(
+      action.nonce,
+      requirements.maxTimeoutSeconds,
+      options.allowExpired
+    )) {
+      return { isValid: false, invalidReason: "payment_expired" };
+    }
     const decimals = await this.resolveDecimals(requirements);
     if (!this.validateAmount(amount, requirements.amount, decimals)) {
       return { isValid: false, invalidReason: "invalid_exact_hl_payload_amount_mismatch" };
-    }
-    if (options.enforceTtl && !this.validateTtl(action.nonce, requirements.maxTimeoutSeconds)) {
-      return { isValid: false, invalidReason: "payment_expired" };
     }
     let recoveredPayer;
     try {
@@ -216,7 +223,7 @@ var ExactHyperliquidScheme = class {
   }
   async settle(payload, requirements) {
     const verification = await this.verifyPayment(payload, requirements, {
-      enforceTtl: false
+      allowExpired: true
     });
     if (!verification.isValid) {
       return {
@@ -252,11 +259,16 @@ var ExactHyperliquidScheme = class {
     if (cached) return cached;
     const pending = this.pendingSettlements.get(idempotencyKey);
     if (pending) return pending;
-    const ttlValid = this.validateTtl(
+    const expiredAtStart = !this.validateTtl(
       exactPayload.action.nonce,
       requirements.maxTimeoutSeconds
     );
-    const settlement = this.settleVerified(exactPayload, requirements, payer, ttlValid).then((response) => {
+    const settlement = this.settleVerified(
+      exactPayload,
+      requirements,
+      payer,
+      expiredAtStart
+    ).then((response) => {
       if (response.success) {
         this.cacheSettlement(idempotencyKey, response);
       }
@@ -267,7 +279,7 @@ var ExactHyperliquidScheme = class {
     this.pendingSettlements.set(idempotencyKey, settlement);
     return settlement;
   }
-  async settleVerified(exactPayload, requirements, payer, ttlValid) {
+  async settleVerified(exactPayload, requirements, payer, expiredAtStart) {
     const endpoint = getExchangeBaseUrl(requirements.network);
     const infoClient = createInfoClient(requirements.network);
     try {
@@ -276,7 +288,7 @@ var ExactHyperliquidScheme = class {
         payer,
         exactPayload,
         requirements,
-        ttlValid ? 1 : PRE_SUBMIT_RECONCILIATION_ATTEMPTS
+        expiredAtStart ? PRE_SUBMIT_RECONCILIATION_ATTEMPTS : 1
       );
       if (existingHash) {
         return {
@@ -299,9 +311,13 @@ var ExactHyperliquidScheme = class {
           payer
         };
       }
+      const confirmationDeadline = Date.now() + POST_SUBMIT_CONFIRMATION_TIMEOUT_MS;
       let submissionFailed = false;
       try {
-        await this.submitToExchange(endpoint, exactPayload);
+        await this.runBeforeDeadline(
+          confirmationDeadline,
+          (signal) => this.submitToExchange(endpoint, exactPayload, signal)
+        );
       } catch {
         submissionFailed = true;
       }
@@ -309,7 +325,9 @@ var ExactHyperliquidScheme = class {
         infoClient,
         payer,
         exactPayload,
-        requirements
+        requirements,
+        void 0,
+        confirmationDeadline
       );
       if (matchedHash) {
         return {
@@ -337,10 +355,11 @@ var ExactHyperliquidScheme = class {
       };
     }
   }
-  async submitToExchange(endpoint, payload) {
+  async submitToExchange(endpoint, payload, signal) {
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal,
       body: JSON.stringify({
         action: payload.action,
         signature: payload.signature,
@@ -373,44 +392,86 @@ var ExactHyperliquidScheme = class {
       return String(body).slice(0, 500);
     }
   }
-  async confirmTransaction(hash, payer, payload, requirements) {
+  async runBeforeDeadline(deadline, operation) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("confirmation deadline exceeded");
+    const controller = new AbortController();
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error("confirmation deadline exceeded"));
+      }, remaining);
+    });
+    try {
+      return await Promise.race([operation(controller.signal), timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  async confirmTransaction(hash, payer, payload, requirements, deadline) {
     for (let i = 0; i < 3; i++) {
+      if (deadline != null && Date.now() >= deadline) return false;
       try {
-        const tx = await fetchTransactionDetails(
-          requirements.network,
-          hash
+        const tx = deadline == null ? await fetchTransactionDetails(requirements.network, hash) : await this.runBeforeDeadline(
+          deadline,
+          (signal) => fetchTransactionDetails(
+            requirements.network,
+            hash,
+            signal
+          )
         );
+        if (deadline != null && Date.now() >= deadline) return false;
         if (tx.error != null || tx.user.toLowerCase() !== payer.toLowerCase()) {
           return false;
         }
         const action = tx.action;
         const expected = payload.action;
-        const decimals = await this.resolveDecimals(requirements);
+        const decimals = deadline == null ? await this.resolveDecimals(requirements) : await this.runBeforeDeadline(
+          deadline,
+          (signal) => this.resolveDecimals(requirements, signal)
+        );
+        if (deadline != null && Date.now() >= deadline) return false;
         return action.type === "sendAsset" && action.signatureChainId === expected.signatureChainId && action.hyperliquidChain === expected.hyperliquidChain && typeof action.destination === "string" && action.destination.toLowerCase() === expected.destination.toLowerCase() && typeof action.token === "string" && this.tokenMatchesRequirements(action.token, expected.token) && typeof action.amount === "string" && this.decimalAmountsEqual(action.amount, expected.amount, decimals) && action.nonce === expected.nonce;
       } catch {
       }
-      await new Promise((r) => setTimeout(r, 250));
+      const remaining = deadline == null ? 250 : deadline - Date.now();
+      if (remaining <= 0) return false;
+      await new Promise((r) => setTimeout(r, Math.min(250, remaining)));
     }
     return false;
   }
-  async findConfirmedTransaction(client, payer, payload, requirements, attempts) {
+  async findConfirmedTransaction(client, payer, payload, requirements, attempts, confirmationDeadline) {
     const action = payload.action;
     const destination = typeof action.destination === "string" ? action.destination : void 0;
     const token = typeof action.token === "string" ? action.token : void 0;
     const amount = typeof action.amount === "string" ? action.amount : void 0;
     if (!destination || !token || !amount) return void 0;
-    const decimals = await this.resolveDecimals(requirements);
+    const deadline = attempts === void 0 ? confirmationDeadline ?? Date.now() + POST_SUBMIT_CONFIRMATION_TIMEOUT_MS : void 0;
+    let decimals;
+    try {
+      decimals = deadline == null ? await this.resolveDecimals(requirements) : await this.runBeforeDeadline(
+        deadline,
+        (signal) => this.resolveDecimals(requirements, signal)
+      );
+    } catch {
+      return void 0;
+    }
     const startTime = Math.max(0, payload.nonce - MATCH_LOOKBACK_MS);
-    const deadline = attempts === void 0 ? Date.now() + POST_SUBMIT_CONFIRMATION_TIMEOUT_MS : void 0;
     let attempt = 0;
     while (attempts === void 0 ? attempt === 0 || Date.now() < deadline : attempt < attempts) {
       attempt += 1;
       try {
-        const updates = await client.userNonFundingLedgerUpdates({
+        const updateParameters = {
           user: payer,
           startTime,
           endTime: Date.now() + MATCH_LOOKAHEAD_MS
-        });
+        };
+        const updates = deadline == null ? await client.userNonFundingLedgerUpdates(updateParameters) : await this.runBeforeDeadline(
+          deadline,
+          (signal) => client.userNonFundingLedgerUpdates(updateParameters, signal)
+        );
+        if (deadline != null && Date.now() >= deadline) break;
         const candidates = updates.filter(
           (update) => this.ledgerUpdateMatchesPayment(update, {
             payer,
@@ -427,7 +488,8 @@ var ExactHyperliquidScheme = class {
             candidate.hash,
             payer,
             payload,
-            requirements
+            requirements,
+            deadline
           )) {
             return candidate.hash;
           }
@@ -516,12 +578,12 @@ var ExactHyperliquidScheme = class {
   normalizeDecimal(value) {
     return value.trim().replace(/^0+(?=\d)/, "").replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
   }
-  async resolveDecimals(req) {
+  async resolveDecimals(req, signal) {
     if (typeof req.extra?.decimals === "number") return req.extra.decimals;
     const tokenId = this.extractTokenId(req.asset);
     if (!tokenId) return void 0;
     try {
-      const info = await fetchHyperliquidTokenInfo(req.network, tokenId);
+      const info = await fetchHyperliquidTokenInfo(req.network, tokenId, signal);
       return info.decimals;
     } catch {
       return void 0;
@@ -565,10 +627,10 @@ var ExactHyperliquidScheme = class {
     const normalizedFraction = fraction.slice(0, decimals).padEnd(decimals, "0");
     return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(normalizedFraction || "0");
   }
-  validateTtl(actionTime, maxTimeoutSeconds) {
+  validateTtl(actionTime, maxTimeoutSeconds, allowExpired = false) {
     if (typeof actionTime !== "number") return false;
     const now = Date.now();
-    return actionTime <= now + MAX_CLOCK_SKEW_MS && now <= actionTime + maxTimeoutSeconds * 1e3;
+    return actionTime <= now + MAX_CLOCK_SKEW_MS && (allowExpired || now <= actionTime + maxTimeoutSeconds * 1e3);
   }
   paymentNonce(payload) {
     return payload.action.nonce;

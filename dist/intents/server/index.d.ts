@@ -43,10 +43,11 @@ interface PreSettlementIntentVerificationInput {
      * settlement latency into the refund state machine. Defaults to true.
      */
     enforceDeadline?: boolean;
+    /** Defaults to true and binds the signed intent to the Hyperliquid payer. */
+    requireSamePayer?: boolean;
 }
 interface PaidIntentVerificationInput extends PreSettlementIntentVerificationInput {
     settleResponse?: SettleResponse;
-    requireSamePayer?: boolean;
 }
 interface VerifiedPreSettlementExecutionIntent {
     intent: HyperEvmExecutionIntent;
@@ -78,8 +79,9 @@ type PaidIntentVerificationResult = ({
  * payment-requirements hash, domain, quote, template hash, payment binding,
  * deadline, and signature — so a resource server can reject an unpayable
  * intent before settling the HyperCore payment and burning the user's funds.
- * Settlement-dependent checks (settlement binding and payer/signer equality)
- * still require `verifyPaidExecutionIntent` after settlement.
+ * The intent signer is also bound to the payer declared by the independently
+ * signed Hyperliquid payment. Settlement receipt checks still require
+ * `verifyPaidExecutionIntent` after settlement.
  */
 declare function verifyPreSettlementExecutionIntent(input: PreSettlementIntentVerificationInput): Promise<PreSettlementIntentVerificationResult>;
 declare function verifyPaidExecutionIntent(input: PaidIntentVerificationInput): Promise<PaidIntentVerificationResult>;

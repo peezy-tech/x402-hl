@@ -266,7 +266,7 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
           claimToken,
         );
       }
-      if (!policy.allowed) {
+      if (!hasBooleanDiscriminator(policy, "allowed") || policy.allowed === false) {
         return failAndRefund(
           config,
           record,
@@ -298,7 +298,11 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
         simulation = { success: false };
       }
       const simulationFailure = verifySimulation(record, simulation);
-      if (simulationFailure || !simulation.success) {
+      if (
+        simulationFailure ||
+        !hasBooleanDiscriminator(simulation, "success") ||
+        simulation.success === false
+      ) {
         return failAndRefund(
           config,
           record,
@@ -367,8 +371,29 @@ export function createIntentExecutor(config: IntentExecutorConfig) {
         );
       }
 
-      if (!execution.success) {
-        if (execution.mayHaveSucceeded || !execution.refundSafe) {
+      if (!hasBooleanDiscriminator(execution, "success")) {
+        return markManualIntervention(
+          config.store,
+          record,
+          executionClaimToken,
+          safeFailure(
+            "execution_uncertain",
+            "Execution adapter returned an invalid result after submission began",
+            false,
+          ),
+        );
+      }
+
+      if (execution.success === false) {
+        if (
+          typeof execution.refundSafe !== "boolean" ||
+          (Object.prototype.hasOwnProperty.call(
+            execution,
+            "mayHaveSucceeded",
+          ) && typeof execution.mayHaveSucceeded !== "boolean") ||
+          execution.mayHaveSucceeded === true ||
+          execution.refundSafe === false
+        ) {
           return markManualIntervention(
             config.store,
             record,
@@ -689,6 +714,17 @@ function executionContext(record: IntentExecutionRecord): IntentExecutionContext
   };
 }
 
+function hasBooleanDiscriminator<K extends string>(
+  value: unknown,
+  key: K,
+): value is Record<K, boolean> {
+  return (
+    value != null &&
+    typeof value === "object" &&
+    typeof (value as Record<string, unknown>)[key] === "boolean"
+  );
+}
+
 function verifyPolicyBinding(
   record: IntentExecutionRecord,
   policy: Extract<IntentPolicyDecision, { allowed: true }>,
@@ -721,7 +757,10 @@ function verifySimulation(
   record: IntentExecutionRecord,
   simulation: IntentSimulationResult,
 ): IntentFailure | undefined {
-  if (!simulation.success) {
+  if (
+    !hasBooleanDiscriminator(simulation, "success") ||
+    simulation.success === false
+  ) {
     return safeFailure(
       "simulation_failed",
       "Destination execution simulation failed",
@@ -878,7 +917,20 @@ async function runRefund(
     );
   }
 
-  if (refund.success) {
+  if (!hasBooleanDiscriminator(refund, "success")) {
+    return markManualIntervention(
+      config.store,
+      record,
+      refundClaimToken,
+      safeFailure(
+        "refund_uncertain",
+        "Refund adapter returned an invalid result after submission began",
+        false,
+      ),
+    );
+  }
+
+  if (refund.success === true) {
     if (
       refund.confirmed !== true ||
       typeof refund.transaction !== "string" ||
@@ -951,7 +1003,12 @@ async function runRefund(
     );
   }
 
-  if (refund.mayHaveSucceeded) {
+  if (
+    typeof refund.retryable !== "boolean" ||
+    (Object.prototype.hasOwnProperty.call(refund, "mayHaveSucceeded") &&
+      typeof refund.mayHaveSucceeded !== "boolean") ||
+    refund.mayHaveSucceeded === true
+  ) {
     return markManualIntervention(
       config.store,
       record,

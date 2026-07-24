@@ -26,16 +26,30 @@ export type SignExecutionIntentOptions =
   | { paymentRequirements?: never; paymentRequirementsHash: Hex | string };
 
 export function getIntentSignerAddress(signer: IntentSigner): Address {
+  const explicitAddress = signer.address
+    ? getAddress(signer.address)
+    : undefined;
   const account = signer.account;
-  const address =
-    signer.address ??
-    (typeof account === "string" ? account : account?.address);
+  const accountValue =
+    typeof account === "string" ? account : account?.address;
+  const accountAddress = accountValue ? getAddress(accountValue) : undefined;
 
+  if (
+    explicitAddress &&
+    accountAddress &&
+    explicitAddress !== accountAddress
+  ) {
+    throw new Error(
+      "Intent signer address must match the configured signing account",
+    );
+  }
+
+  const address = explicitAddress ?? accountAddress;
   if (!address) {
     throw new Error("Intent signer is missing an EVM address");
   }
 
-  return getAddress(address);
+  return address;
 }
 
 export async function signExecutionIntent(
