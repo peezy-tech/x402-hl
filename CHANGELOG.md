@@ -8,7 +8,9 @@ Notable changes to `x402-hl` are recorded here.
 
 - Pre-settlement intent verification now recovers the independently signed
   Hyperliquid payment payer and, by default, requires it to match the recovered
-  execution-intent signer before funds move.
+  execution-intent signer before funds move. Delegated-payer mode still
+  validates the payment signature and binds the settlement receipt to its
+  recovered payment payer.
 - Signed intent envelopes and their inner intent objects now reject unknown
   fields, forged declared signers, unsafe numeric values, and non-canonical
   runtime inputs.

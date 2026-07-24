@@ -258,6 +258,11 @@ signature. The receipt payer is checked against the recovered intent signer
 again. Never replace settlement evidence with a successful facilitator
 `verify()` response.
 
+If a separately reviewed delegated-payer design sets `requireSamePayer: false`,
+verification still requires a valid payment signature and binds the settlement
+receipt payer to the recovered payment payer. Only equality between that payer
+and the intent signer is relaxed.
+
 ## 4. Implement A Durable Store Adapter
 
 The store is the replay and concurrency boundary. Store every settled payment,

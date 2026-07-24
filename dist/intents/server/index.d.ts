@@ -54,6 +54,7 @@ interface VerifiedPreSettlementExecutionIntent {
     intentHash: Hex;
     intentTemplateHash: Hex;
     paymentRequirementsHash: Hex;
+    paymentPayer: Address;
     signer: Address;
 }
 interface VerifiedPaidExecutionIntent extends VerifiedPreSettlementExecutionIntent {

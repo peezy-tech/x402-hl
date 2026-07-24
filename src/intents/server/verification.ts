@@ -51,6 +51,7 @@ export interface VerifiedPreSettlementExecutionIntent {
   intentHash: Hex;
   intentTemplateHash: Hex;
   paymentRequirementsHash: Hex;
+  paymentPayer: Address;
   signer: Address;
 }
 
@@ -256,42 +257,43 @@ export async function verifyPreSettlementExecutionIntent(
     );
   }
 
-  if (input.requireSamePayer !== false) {
-    let paymentPayer: Address;
-    try {
-      const parsedPayment = ExactHyperliquidPayloadSchema.parse(
-        input.paymentPayload.payload,
-      );
-      const recoveredPayer = await recoverTypedDataAddress({
-        domain: {
-          name: "HyperliquidSignTransaction",
-          version: "1",
-          chainId: Number.parseInt(parsedPayment.action.signatureChainId),
-          verifyingContract: "0x0000000000000000000000000000000000000000",
-        },
-        types: SendAssetTypes,
-        primaryType: "HyperliquidTransaction:SendAsset",
-        message: parsedPayment.action,
-        signature: {
-          r: parsedPayment.signature.r as Hex,
-          s: parsedPayment.signature.s as Hex,
-          yParity: parsedPayment.signature.v - 27,
-        },
-      });
-      paymentPayer = getAddress(recoveredPayer);
-      if (paymentPayer !== getAddress(parsedPayment.user)) throw new Error();
-    } catch {
-      return failure(
-        "malformed_extension_payload",
-        "Hyperliquid payment payload does not contain a valid payer signature",
-      );
-    }
-    if (paymentPayer !== getAddress(signature.signer)) {
-      return failure(
-        "execution_intent_payer_mismatch",
-        "Execution intent signer does not match the signed Hyperliquid payer",
-      );
-    }
+  let paymentPayer: Address;
+  try {
+    const parsedPayment = ExactHyperliquidPayloadSchema.parse(
+      input.paymentPayload.payload,
+    );
+    const recoveredPayer = await recoverTypedDataAddress({
+      domain: {
+        name: "HyperliquidSignTransaction",
+        version: "1",
+        chainId: Number.parseInt(parsedPayment.action.signatureChainId),
+        verifyingContract: "0x0000000000000000000000000000000000000000",
+      },
+      types: SendAssetTypes,
+      primaryType: "HyperliquidTransaction:SendAsset",
+      message: parsedPayment.action,
+      signature: {
+        r: parsedPayment.signature.r as Hex,
+        s: parsedPayment.signature.s as Hex,
+        yParity: parsedPayment.signature.v - 27,
+      },
+    });
+    paymentPayer = getAddress(recoveredPayer);
+    if (paymentPayer !== getAddress(parsedPayment.user)) throw new Error();
+  } catch {
+    return failure(
+      "malformed_extension_payload",
+      "Hyperliquid payment payload does not contain a valid payer signature",
+    );
+  }
+  if (
+    input.requireSamePayer !== false &&
+    paymentPayer !== getAddress(signature.signer)
+  ) {
+    return failure(
+      "execution_intent_payer_mismatch",
+      "Execution intent signer does not match the signed Hyperliquid payer",
+    );
   }
 
   return {
@@ -300,6 +302,7 @@ export async function verifyPreSettlementExecutionIntent(
     intentHash: expectedHash,
     intentTemplateHash,
     paymentRequirementsHash,
+    paymentPayer,
     signer: signature.signer,
   };
 }
@@ -323,6 +326,13 @@ export async function verifyPaidExecutionIntent(
 
   const verified = await verifyPreSettlementExecutionIntent(input);
   if (!verified.ok) return verified;
+
+  if (payer !== verified.paymentPayer) {
+    return failure(
+      "execution_intent_payer_mismatch",
+      "Settled payer does not match the signed Hyperliquid payment payer",
+    );
+  }
 
   if (
     input.requireSamePayer !== false &&

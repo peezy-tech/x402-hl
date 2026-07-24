@@ -651,6 +651,18 @@ test("verification requires a settled payer and enforces payer/signer equality",
     });
     assertFailure(result, "execution_intent_payer_mismatch");
   });
+
+  await t.test("delegated mode still binds the receipt to the signed payment payer", async () => {
+    const result = await verifyPaidExecutionIntent({
+      ...verificationInput(fixture),
+      requireSamePayer: false,
+      settleResponse: {
+        ...fixture.settleResponse,
+        payer: otherAccount.address,
+      },
+    });
+    assertFailure(result, "execution_intent_payer_mismatch");
+  });
 });
 
 test("verification rejects an expired intent", async () => {
@@ -736,6 +748,39 @@ test("pre-settlement verification rejects unpayable intents before funds move", 
       },
     });
     expectFailure(result, "execution_intent_payer_mismatch");
+  });
+
+  await t.test("valid delegated payment payer is accepted", async () => {
+    const createdPayment = await new ExactHyperliquidClient(
+      otherAccount,
+    ).createPaymentPayload(2, fixture.paymentRequirements);
+    const result = await verifyPreSettlementExecutionIntent({
+      ...preSettlementInput(fixture),
+      requireSamePayer: false,
+      paymentPayload: {
+        ...createdPayment,
+        accepted: structuredClone(fixture.paymentRequirements),
+        extensions: fixture.paymentPayload.extensions,
+      },
+    });
+    if (!result.ok) assert.fail(`${result.reason}: ${result.message}`);
+    assert.equal(result.paymentPayer, otherAccount.address);
+    assert.equal(result.signer, account.address);
+  });
+
+  await t.test("delegated mode still rejects an invalid payment signature", async () => {
+    const paymentPayload = structuredClone(fixture.paymentPayload);
+    (
+      paymentPayload.payload as {
+        signature: { r: string };
+      }
+    ).signature.r = `0x${"00".repeat(32)}`;
+    const result = await verifyPreSettlementExecutionIntent({
+      ...preSettlementInput(fixture),
+      requireSamePayer: false,
+      paymentPayload,
+    });
+    expectFailure(result, "malformed_extension_payload");
   });
 
   await t.test("a NaN verification clock fails closed", async () => {
@@ -1436,6 +1481,9 @@ test("a settled alternate payment option for the same quote is durably refunded"
 
 test("a delegated payer's second settled payment is durably refunded", async () => {
   const fixture = await makeFixture();
+  const delegatedPayment = await new ExactHyperliquidClient(
+    otherAccount,
+  ).createPaymentPayload(2, fixture.paymentRequirements);
   const store = new InMemoryIntentExecutionStore();
   const refundedPayers: string[] = [];
   const executor = createIntentExecutor(
@@ -1456,6 +1504,11 @@ test("a delegated payer's second settled payment is durably refunded", async () 
   const duplicate = await executor.execute({
     ...executionInput(fixture),
     requireSamePayer: false,
+    paymentPayload: {
+      ...delegatedPayment,
+      accepted: structuredClone(fixture.paymentRequirements),
+      extensions: fixture.paymentPayload.extensions,
+    },
     settleResponse: {
       ...fixture.settleResponse,
       payer: otherAccount.address,

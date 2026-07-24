@@ -217,6 +217,9 @@ Verification fails on missing or unsuccessful settlement, a changed payment
 requirement, mismatched domain/quote/template, expired intent, invalid
 signature, or a payer/signer mismatch. Keep `requireSamePayer` enabled unless
 the application has an explicit, separately reviewed delegated-payer design.
+Disabling it relaxes only the intent-signer/payment-payer equality check: the
+payment signature must remain valid, and the settled payer must still match the
+signed payment payer.
 
 The executor's `execute` runs this same verification but defers only the
 deadline check to the durable state machine. Settlement takes real time, so an
